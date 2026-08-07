@@ -36,7 +36,8 @@ usage:
   tower open                                      open the status board in a browser
   tower kill <name>                               stop a session (or "daemon" to stop towerd)
   tower config get [key]                          show configuration (secrets masked)
-  tower config set <key> <value>                  set a value (e.g. anthropic_key sk-...)
+  tower config set <key> <value>                  set a value
+  tower config set anthropic_key                  prompts for the key (kept out of shell history)
   tower config unset <key>                        remove a value
 `);
   process.exit(process.argv.length <= 2 ? 0 : 1);
@@ -158,7 +159,9 @@ async function cmdLs() {
   const now = Date.now();
   const showDoing = list.some((s) => s.summary && s.summary.doing);
   const rows = list.map((s) => ({
-    name: truncate(s.name, 28),
+    // name truncation exists to make room for DOING; without summaries the
+    // output stays byte-identical to v1
+    name: showDoing ? truncate(s.name, 28) : s.name,
     status: s.status,
     last: s.exited ? fmtDur(now - (s.exitedAt || now)) : fmtDur(now - (s.lastOutputAt || now)),
     pid: String(s.childPid || s.pid || '-'),
@@ -253,6 +256,49 @@ async function cmdKill(name) {
 
 const SECRET_KEY_RE = /key|token|secret/i;
 
+// Keys typed as arguments land in shell history and the process list;
+// `tower config set anthropic_key` with no value reads it invisibly instead
+// (or from a pipe when stdin is not a terminal).
+function readSecret(promptText) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) {
+      let buf = '';
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (d) => {
+        buf += d;
+        const i = buf.indexOf('\n');
+        if (i !== -1) { process.stdin.pause(); resolve(buf.slice(0, i).trim()); }
+      });
+      process.stdin.on('end', () => resolve(buf.trim()));
+      return;
+    }
+    process.stdout.write(promptText);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    let val = '';
+    const onData = (ch) => {
+      for (const c of ch) {
+        if (c === '\r' || c === '\n') {
+          process.stdin.setRawMode(false);
+          process.stdin.pause();
+          process.stdin.removeListener('data', onData);
+          process.stdout.write('\n');
+          return resolve(val.trim());
+        }
+        if (c === '\x03') { // ctrl-c
+          process.stdin.setRawMode(false);
+          process.stdout.write('\n');
+          process.exit(130);
+        }
+        if (c === '\x7f' || c === '\b') { val = val.slice(0, -1); continue; }
+        val += c;
+      }
+    };
+    process.stdin.on('data', onData);
+  });
+}
+
 async function cmdConfig(args) {
   const config = require('../src/config');
   const sub = args[0];
@@ -280,11 +326,20 @@ async function cmdConfig(args) {
     return;
   }
 
-  if (sub === 'set' && args[1] && args.length >= 3) {
+  if (sub === 'set' && args[1]) {
     const key = args[1];
     const wanted = config.KNOWN_KEYS[key];
     if (!wanted) return unknownKey(key, config);
-    const raw = args.slice(2).join(' ');
+    let raw = args.slice(2).join(' ');
+    if (key === 'anthropic_key' && (!raw || raw === '-')) {
+      raw = await readSecret('paste your Anthropic API key (input hidden): ');
+      if (!raw) {
+        console.error('tower: no key entered');
+        process.exit(1);
+      }
+    } else if (!raw) {
+      usage();
+    }
     let value = raw;
     if (wanted !== 'string') {
       try { value = JSON.parse(raw); } catch { /* stays a string, caught below */ }

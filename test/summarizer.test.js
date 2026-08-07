@@ -195,6 +195,75 @@ test('exited session is summarized once with the exit noted, then left alone', a
   } finally { await api.close(); }
 });
 
+test('exit pass survives a transient failure and completes when the network returns', async () => {
+  const api = await mockApi();
+  await api.close(); // network down for the first tick
+  writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+  const { s, sessions } = makeSummarizer();
+  const sess = fakeSession({ exited: true, exitCode: 1, lines: ['build started', 'fatal: out of memory', 'build aborted'] });
+  sessions.push(sess);
+  await s._tick();
+  assert.strictEqual(sess.summary, null);
+  assert.notStrictEqual(sess.summaryCtl.exitDone, true); // the latch must not burn on failure
+  const api2 = await mockApi();
+  try {
+    await s._tick(); // backoff tick (skipped)
+    await s._tick(); // live again
+    assert.strictEqual(api2.state.calls, 1);
+    assert.ok(sess.summary);
+    assert.strictEqual(sess.summaryCtl.exitDone, true);
+    await s._tick(); // and only once
+    assert.strictEqual(api2.state.calls, 1);
+  } finally { await api2.close(); }
+});
+
+test('call budget goes to the least-recently-summarized, nobody starves', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    const { s, sessions } = makeSummarizer();
+    for (let i = 0; i < 8; i++) {
+      sessions.push(fakeSession({ id: 'sess' + i, name: 'sess' + i, lines: [`alpha work item ${i}`, `beta result ${i}`, `gamma detail ${i}`] }));
+    }
+    await s._tick();
+    assert.strictEqual(api.state.calls, 6); // capped
+    await s._tick();
+    assert.strictEqual(api.state.calls, 8); // the two left behind go first next tick
+    const named = new Set(api.state.bodies.map((b) => b.messages[0].content.match(/session: (\S+)/)[1]));
+    assert.strictEqual(named.size, 8);
+  } finally { await api.close(); }
+});
+
+test('isLive veto: a session dropped from its registry costs nothing', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    const notes = { logs: [] };
+    const sessions = [fakeSession()];
+    const s = createSummarizer({
+      collect: () => sessions,
+      notify: () => {},
+      log: (m) => notes.logs.push(m),
+      isLive: () => false,
+    });
+    await s._tick();
+    assert.strictEqual(api.state.calls, 0);
+  } finally { await api.close(); }
+});
+
+test('parseSummary strips ANSI and control bytes from model output', () => {
+  const p = parseSummary(JSON.stringify({
+    doing: 'work[2J[1;1Hing on it',
+    last: 'line with  bell',
+    next: ']0;evil titleprobably fine',
+  }));
+  assert.ok(p, 'should still parse');
+  for (const v of [p.doing, p.last, p.next]) {
+    assert.ok(!/[ -]/.test(v), 'control byte survived in ' + JSON.stringify(v));
+  }
+  assert.match(p.next, /probably fine/);
+});
+
 test('no key or summaries disabled: never calls, never errors', async () => {
   const api = await mockApi();
   try {

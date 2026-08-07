@@ -34,10 +34,14 @@ function load(file = proto.configPath()) {
 
 function save(cfg, file = proto.configPath()) {
   proto.ensureTowerDir();
-  fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  // write-then-rename: a crash mid-write must not leave a torn config that
+  // silently loads as "no config at all"
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
   if (process.platform !== 'win32') {
-    try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
+    try { fs.chmodSync(tmp, 0o600); } catch { /* best effort */ }
   }
+  fs.renameSync(tmp, file);
 }
 
 function getPath(obj, dotted) {

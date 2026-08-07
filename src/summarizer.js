@@ -73,8 +73,14 @@ function buildUserContent(item) {
   return parts.join('\n');
 }
 
+// Model output ends up in terminals (tower ls) and in state.json; a hostile
+// transcript could talk the model into emitting escape sequences, so control
+// bytes are stripped no matter what JSON.parse decoded.
+const SUMMARY_ANSI_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]/g;
+const SUMMARY_CTRL_RE = /[\x00-\x1f\x7f]/g;
+
 // Defensive parse: fences stripped, outermost braces only, three non-empty
-// string fields or nothing.
+// control-free string fields or nothing.
 function parseSummary(text) {
   let t = String(text || '').trim();
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -84,7 +90,11 @@ function parseSummary(text) {
   if (start === -1 || end <= start) return null;
   let obj = null;
   try { obj = JSON.parse(t.slice(start, end + 1)); } catch { return null; }
-  const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, MAX_FIELD_CHARS) : null);
+  const clean = (v) => {
+    if (typeof v !== 'string') return null;
+    const s = v.replace(SUMMARY_ANSI_RE, '').replace(SUMMARY_CTRL_RE, ' ').trim();
+    return s ? s.slice(0, MAX_FIELD_CHARS) : null;
+  };
   const doing = clean(obj.doing);
   const last = clean(obj.last);
   const next = clean(obj.next);
@@ -95,7 +105,9 @@ function parseSummary(text) {
 // collect() -> iterable of session records. A record is summarizable when it
 // has id/name/cwd/command and either a live `buffer` (wrapped session) or a
 // `narrative()` method (transcript-backed session, see claudewatch.js).
-function createSummarizer({ collect, notify, log }) {
+// isLive(sess) lets the owner veto a paid call for a record that was removed
+// from its registry while a slow tick was in flight.
+function createSummarizer({ collect, notify, log, isLive = () => true }) {
   let timer = null;
   let stopped = false;
   let running = false;
@@ -113,7 +125,8 @@ function createSummarizer({ collect, notify, log }) {
     return {
       on: !!(key && eff.summaries.enabled && !lastError),
       keyless: !key,
-      error: lastError,
+      // A removed key is not "rejected": show the hint, not a stale error.
+      error: key ? lastError : null,
     };
   }
 
@@ -133,11 +146,14 @@ function createSummarizer({ collect, notify, log }) {
     const lines = meaningfulLines(sess.buffer.toLines());
     if (lines.length === 0) { if (sess.exited) ctl.exitDone = true; return null; }
     const sig = hashLines(lines);
+    let exitedPass = false;
     if (sess.exited) {
       // One final pass so the story ends where the process did; if nothing
       // changed since the last summary, the standing one already tells it.
-      ctl.exitDone = true;
-      if (sig === ctl.sig && sess.summary) return null;
+      // The latch is committed only after the API call happens (or the story
+      // is already told) - a transient failure must not eat the last chapter.
+      if (sig === ctl.sig && sess.summary) { ctl.exitDone = true; return null; }
+      exitedPass = true;
     } else if (sig === ctl.sig) {
       return null;
     } else if (ctl.lineSet) {
@@ -145,7 +161,7 @@ function createSummarizer({ collect, notify, log }) {
       for (const l of lines) if (!ctl.lineSet.has(l)) fresh++;
       if (fresh < MIN_NEW_LINES && sess.summary) return null;
     }
-    return { sess, ctl, sig, lines, name: sess.name, cwd: sess.cwd, command: sess.command,
+    return { sess, ctl, sig, lines, exitedPass, name: sess.name, cwd: sess.cwd, command: sess.command,
       exited: sess.exited, exitCode: sess.exitCode, previous: sess.summary || null,
       contentLabel: 'recent output', content: lines.join('\n') };
   }
@@ -159,14 +175,19 @@ function createSummarizer({ collect, notify, log }) {
       messages: [{ role: 'user', content: buildUserContent(item) }],
     });
     const parsed = parseSummary(anthropic.extractText(res));
-    // Track what we summarized either way; malformed output keeps the
-    // previous summary and does not thrash retries on the same content.
+    // The call happened: commit the change-tracking either way (malformed
+    // output keeps the previous summary and does not thrash retries on the
+    // same content), and an exit pass counts as done.
     item.ctl.sig = item.sig;
     if (item.lines) item.ctl.lineSet = new Set(item.lines);
+    if (item.exitedPass) item.ctl.exitDone = true;
     if (!parsed) {
       log(`summarizer: malformed model output for ${item.name}; keeping previous summary`);
       return;
     }
+    // The owner may have dropped this record while we were on the wire;
+    // writing a summary to a ghost helps no one.
+    if (!isLive(item.sess)) return;
     item.sess.summary = { ...parsed, summarizedAt: Date.now() };
     notify();
   }
@@ -181,13 +202,21 @@ function createSummarizer({ collect, notify, log }) {
       lastError = null;
     }
     if (skipTicks > 0) { skipTicks--; return; }
-    const candidates = [];
+    // Evaluate everything, then spend the per-tick call budget on whoever has
+    // gone longest without a summary - a fixed iteration order would starve
+    // whatever happens to sit past the cap forever.
+    let candidates = [];
     for (const sess of collect()) {
       const item = evaluate(sess);
       if (item) candidates.push(item);
-      if (candidates.length >= MAX_CALLS_PER_TICK) break;
+    }
+    if (candidates.length > MAX_CALLS_PER_TICK) {
+      candidates.sort((a, b) =>
+        ((a.sess.summary && a.sess.summary.summarizedAt) || 0) - ((b.sess.summary && b.sess.summary.summarizedAt) || 0));
+      candidates = candidates.slice(0, MAX_CALLS_PER_TICK);
     }
     for (const item of candidates) {
+      if (!isLive(item.sess)) continue; // removed while this tick was running
       try {
         await summarizeOne(item, eff, key);
         failures = 0;

@@ -141,6 +141,60 @@ test('sweep: recent transcripts become records, stale and deleted ones drop, abs
   assert.strictEqual([...w.records()].length, 0);
 });
 
+test('tool-only appends do not change the narrative sig (no re-billing)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tower-ccroot3-'));
+  fs.writeFileSync(proto.configPath(), JSON.stringify({ claude_projects_dir: root }));
+  const projDir = path.join(root, 'C--work-three');
+  fs.mkdirSync(projDir);
+  const file = path.join(projDir, 'gggg-hhhh.jsonl');
+  fs.writeFileSync(file, [
+    entry('user', 'refactor the parser'),
+    entry('assistant', [{ type: 'text', text: 'Starting with the tokenizer.' }]),
+  ].join('\n') + '\n');
+
+  const w = createClaudeWatch({ notify: () => {}, log: () => {} });
+  w._sweep();
+  const rec = [...w.records()][0];
+  const sig1 = rec.narrative().sig;
+
+  // a tool call and its result: new entries, same conversation text
+  fs.appendFileSync(file, [
+    entry('assistant', [{ type: 'tool_use', name: 'Read', id: 'r1', input: {} }]),
+    entry('user', [{ type: 'tool_result', tool_use_id: 'r1', content: 'big file body' }]),
+  ].join('\n') + '\n');
+  w._sweep();
+  assert.strictEqual(rec.narrative().sig, sig1);
+
+  // real text does change it
+  fs.appendFileSync(file, entry('assistant', [{ type: 'text', text: 'Tokenizer done; moving to the AST.' }]) + '\n');
+  w._sweep();
+  assert.notStrictEqual(rec.narrative().sig, sig1);
+});
+
+test('an unparseable tail (giant mid-append line) keeps the last good turns', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tower-ccroot4-'));
+  fs.writeFileSync(proto.configPath(), JSON.stringify({ claude_projects_dir: root }));
+  const projDir = path.join(root, 'C--work-four');
+  fs.mkdirSync(projDir);
+  const file = path.join(projDir, 'iiii-jjjj.jsonl');
+  fs.writeFileSync(file, [
+    entry('user', 'audit the deps'),
+    entry('assistant', [{ type: 'text', text: 'Two advisories found. Should I pin both?' }]),
+  ].join('\n') + '\n');
+
+  const w = createClaudeWatch({ notify: () => {}, log: () => {} });
+  w._sweep();
+  const rec = [...w.records()][0];
+  assert.strictEqual(rec.turns.length, 2);
+  assert.strictEqual(rec.waiting, true);
+
+  // a single unterminated 300KB line swamps the 256KB tail window
+  fs.writeFileSync(file, 'x'.repeat(300 * 1024));
+  w._sweep();
+  assert.strictEqual(rec.turns.length, 2, 'turns wiped by unparseable tail');
+  assert.strictEqual(rec.waiting, true, 'waiting state wiped by unparseable tail');
+});
+
 test('restore re-attaches summaries by id without re-summarizing unchanged transcripts', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tower-ccroot2-'));
   fs.writeFileSync(proto.configPath(), JSON.stringify({ claude_projects_dir: root }));

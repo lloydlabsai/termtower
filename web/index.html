@@ -366,7 +366,10 @@ const LABELS = {
 };
 
 function statusLabel(s) {
-  if (s.status === 'exited-error') return `exited · code ${s.exitCode}`;
+  if (s.status === 'exited-error') {
+    // signal deaths report code 0/null from the PTY; the signal is the story
+    return s.exitSignal ? `exited · ${s.exitSignal}` : `exited · code ${s.exitCode}`;
+  }
   return LABELS[s.status] || s.status;
 }
 

@@ -12,6 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
+const { hashLines } = require('./summarizer');
 
 const POLL_MS = 10000;              // directory sweep cadence
 const SHOW_WINDOW_MS = 45 * 60000;  // transcripts quiet longer than this drop off the board
@@ -102,6 +103,9 @@ function createClaudeWatch({ notify, log }) {
   function scanFile(dir, base, stat) {
     const id = 'cc-' + base.replace(/\.jsonl$/, '');
     let rec = records.get(id);
+    // Same basename in two project dirs would otherwise share one thrashing
+    // record; first one seen wins, the double is ignored.
+    if (rec && rec.file !== path.join(dir, base)) return false;
     if (rec && rec.mtimeMs === stat.mtimeMs && rec.size === stat.size) {
       return false; // untouched since last sweep
     }
@@ -122,14 +126,14 @@ function createClaudeWatch({ notify, log }) {
         restored.delete(id);
       }
       records.set(id, rec);
-      // narrative() is the summarizer's hook; sig is the last entry seen, so
-      // an unchanged transcript is never re-summarized.
+      // narrative() is the summarizer's hook. The sig hashes the turn TEXT,
+      // not the last entry id: tool calls append entries constantly without
+      // changing what the conversation says, and identical content must
+      // never be re-billed.
       rec.narrative = () => {
         if (!rec.turns || rec.turns.length === 0) return null;
-        return {
-          sig: `${rec.lastUuid || ''}:${rec.turns.length}`,
-          content: rec.turns.map((t) => `${t.role}: ${t.text}`).join('\n\n'),
-        };
+        const content = rec.turns.map((t) => `${t.role}: ${t.text}`).join('\n\n');
+        return { sig: hashLines([content]), content };
       };
       log(`claude session ${rec.id.slice(0, 11)} (${parsed.title || path.basename(dir)})`);
     }
@@ -140,9 +144,13 @@ function createClaudeWatch({ notify, log }) {
     rec.gitBranch = parsed.gitBranch || rec.gitBranch || null;
     rec.name = parsed.title || rec.name || path.basename(dir);
     rec.command = 'claude code';
-    rec.turns = parsed.turns;
-    rec.lastUuid = parsed.lastUuid;
-    rec.waiting = parsed.waiting;
+    if (parsed.lastUuid || !rec.turns) {
+      rec.turns = parsed.turns;
+      rec.lastUuid = parsed.lastUuid;
+      rec.waiting = parsed.waiting;
+    }
+    // else: the tail was unparseable (a single mid-append entry larger than
+    // TAIL_BYTES); keep the last good turns and waiting state.
     return true;
   }
 
@@ -154,10 +162,14 @@ function createClaudeWatch({ notify, log }) {
     let projectDirs = [];
     try {
       projectDirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory());
-    } catch {
-      // no Claude Code here (or the dir is unreadable): silently nothing
-      if (records.size) { records.clear(); changed = true; }
-      if (changed) notify();
+    } catch (e) {
+      if (e.code === 'ENOENT') {
+        // no Claude Code here: silently nothing
+        if (records.size) { records.clear(); notify(); }
+      } else {
+        // transient (EPERM from an AV sweep, etc): keep what we know
+        log(`claudewatch: ${root}: ${e.message}`);
+      }
       return;
     }
     for (const d of projectDirs) {

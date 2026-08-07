@@ -25,11 +25,16 @@ const claudeWatch = createClaudeWatch({
 });
 
 // The narrative layer: no key configured means this never makes a call and
-// the board behaves exactly as v1.
+// the board behaves exactly as v1. Wrappers claimed by a transcript card are
+// excluded - their summary would be paid for and never shown.
 const summarizer = createSummarizer({
-  collect: () => [...sessions.values(), ...claudeWatch.records()],
+  collect: () => {
+    const claimed = new Set([...claudeClaims().values()].map((s) => s.id));
+    return [...[...sessions.values()].filter((s) => !claimed.has(s.id)), ...claudeWatch.records()];
+  },
   notify: () => notifyChange(),
   log,
+  isLive: (sess) => claudeWatch.get(sess.id) === sess || sessions.get(sess.id) === sess,
 });
 
 function pidAlive(pid) {
@@ -149,7 +154,16 @@ function lightClaude(rec, now = Date.now()) {
   };
 }
 
-const CLAUDE_CMD_RE = /(^|[\\/\s])claude(\.exe|\.cmd)?(\s|$)/i;
+// Matching is deliberately narrow: the wrapped command's first word must BE
+// claude (a path to it and .exe/.cmd/.bat count; npx/bunx claude counts).
+// `tail -f claude.log` must not merge into an agent card.
+function isClaudeCommand(command) {
+  const words = String(command || '').trim().split(/\s+/);
+  let first = words[0] || '';
+  if (/^(npx|bunx)$/i.test(first)) first = words[1] || '';
+  first = path.basename(first.replace(/["']/g, '')).replace(/\.(exe|cmd|bat)$/i, '');
+  return first.toLowerCase() === 'claude';
+}
 
 function normCwd(p) {
   let s = String(p || '').replace(/[\\/]+$/, '');
@@ -157,22 +171,36 @@ function normCwd(p) {
   return s;
 }
 
+// A `tower run claude` wrapper and a transcript record in the same cwd are
+// the same session. One source of truth for that pairing: ccId -> wrapper
+// record, newest transcript first, each wrapper claimed once. Used by the
+// board merge, the summarizer's collect, and kill-through.
+function claudeClaims() {
+  const claims = new Map();
+  const claimed = new Set();
+  const agents = [...claudeWatch.records()].sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+  for (const a of agents) {
+    for (const s of sessions.values()) {
+      if (claimed.has(s.id) || s.exited || !isClaudeCommand(s.command)) continue;
+      if (normCwd(s.cwd) === normCwd(a.cwd)) { claims.set(a.id, s); claimed.add(s.id); break; }
+    }
+  }
+  return claims;
+}
+
 function lightList() {
   const now = Date.now();
-  const wrapped = [...sessions.values()].map((s) => lightSession(s, now));
-  const agents = [...claudeWatch.records()].map((r) => lightClaude(r, now))
-    .sort((a, b) => (b.lastOutputAt || 0) - (a.lastOutputAt || 0));
-  // A `tower run claude` wrapper and a transcript in the same cwd are the same
-  // session. The transcript card wins (it knows what the work is about); the
-  // wrapper lends mechanical truth, and its terminal prompt state beats
-  // file-mtime guesses for "waiting".
+  const claims = claudeClaims();
+  const claimed = new Set([...claims.values()].map((s) => s.id));
   const out = [];
-  const claimed = new Set();
-  for (const a of agents) {
-    const w = wrapped.find((s) => !claimed.has(s.id) && !s.exited &&
-      CLAUDE_CMD_RE.test(s.command) && normCwd(s.cwd) === normCwd(a.cwd));
-    if (w) {
-      claimed.add(w.id);
+  // The transcript card wins (it knows what the work is about); the wrapper
+  // lends mechanical truth, and its terminal prompt state beats file-mtime
+  // guesses for "waiting".
+  for (const r of claudeWatch.records()) {
+    const a = lightClaude(r, now);
+    const wrapper = claims.get(a.id);
+    if (wrapper) {
+      const w = lightSession(wrapper, now);
       a.viaWrapper = w.name;
       a.pid = w.pid;
       a.childPid = w.childPid;
@@ -181,7 +209,9 @@ function lightList() {
     }
     out.push(a);
   }
-  for (const s of wrapped) if (!claimed.has(s.id)) out.push(s);
+  for (const s of sessions.values()) {
+    if (!claimed.has(s.id)) out.push(lightSession(s, now));
+  }
   return out;
 }
 
@@ -264,6 +294,17 @@ function killSession(name) {
   for (const s of sessions.values()) {
     if ((s.name === name || s.id === name) && !s.exited) { target = s; break; }
   }
+  if (!target) {
+    // A merged claude card hides its wrapper's name; killing the card
+    // reaches through to the wrapped process.
+    for (const rec of claudeWatch.records()) {
+      if (rec.name === name || rec.id === name) {
+        target = claudeClaims().get(rec.id) || null;
+        if (!target) return { type: 'error', message: `"${name}" is a transcript-only session; there is no process for tower to stop` };
+        break;
+      }
+    }
+  }
   if (!target) return { type: 'error', message: `no running session named "${name}"` };
   if (target.sock && !target.sock.destroyed) {
     proto.send(target.sock, { type: 'kill', id: target.id });
@@ -284,8 +325,13 @@ function json(res, code, obj) {
   res.end(body);
 }
 
+// The board serves terminal output and transcript text; a DNS-rebinding page
+// could read it cross-origin if we answered arbitrary Host headers.
+const HOST_OK_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+
 const httpServer = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://127.0.0.1');
+  if (req.headers.host && !HOST_OK_RE.test(req.headers.host)) return json(res, 403, { error: 'forbidden host' });
   if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
   if (u.pathname === '/') {
     return fs.readFile(path.join(WEB_DIR, 'index.html'), (err, data) => {
@@ -387,7 +433,15 @@ function saveStateNow() {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   const data = {
     savedAt: Date.now(),
-    sessions: [...sessions.values()].map((s) => ({ ...lightSession(s), lines: s.buffer.toLines() })),
+    sessions: [...sessions.values()].map((s) => ({
+      ...lightSession(s),
+      lines: s.buffer.toLines(),
+      // summarizer bookkeeping rides along so a restart never re-bills an
+      // unchanged session or repeats a done exit pass (board payloads via
+      // lightSession never carry these)
+      summarySig: (s.summaryCtl && s.summaryCtl.sig) || null,
+      summaryExitDone: !!(s.summaryCtl && s.summaryCtl.exitDone),
+    })),
     claude: claudeWatch.persistable(),
   };
   try { fs.writeFileSync(proto.statePath(), JSON.stringify(data), { mode: 0o600 }); } catch { /* best effort */ }
@@ -420,6 +474,7 @@ function loadState() {
       buffer,
       sock: null,
       summary: s.summary || null,
+      summaryCtl: { sig: s.summarySig || undefined, exitDone: !!s.summaryExitDone },
     };
     if (!sess.exited) {
       if (pidAlive(sess.pid) || pidAlive(sess.childPid)) {
@@ -632,4 +687,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { start, sessions, RingBuffer };
+module.exports = { start, sessions, RingBuffer, isClaudeCommand };

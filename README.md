@@ -50,9 +50,11 @@ The waiting heuristic is deliberately dumb and easy to tune: it is a short list 
 Bring your own Anthropic API key and every card gains a three-line story above the raw output: what the session is **doing**, what just happened (**last**), and the likely **next** step — so you can re-enter any terminal without scrollback archaeology.
 
 ```
-tower config set anthropic_key sk-ant-...   # verified with a 1-token test call
-tower ls                                    # now shows a DOING column
+tower config set anthropic_key    # prompts, input hidden, kept out of shell history
+tower ls                          # now shows a DOING column
 ```
+
+(`tower config set anthropic_key sk-ant-...` works too, at the cost of your shell history knowing. Either way the key is verified with a 1-token test call.)
 
 - Summaries refresh only for sessions with meaningfully new output, every `summaries.interval_seconds` (default 180).
 - Each summary carries an "as of Xm ago" stamp. The mechanical status is never derived from summaries.
@@ -143,7 +145,10 @@ v1.5 additions:
 - **Agent `waiting` means an explicit ask** (question tool, plan approval, or trailing `?`), not merely a finished turn. The looser rule felt too shouty; it is parked in IDEAS.
 - **Summaries persist in `state.json`** so a daemon restart does not re-bill unchanged sessions.
 - **`TOWER_DIR` and `TOWER_ANTHROPIC_BASE_URL` env overrides are test seams** (temp state dirs, a local mock API); they are not supported configuration.
-- **Cost posture:** max 6 summary calls per tick, ~120 lines / ~300 output tokens per call, unchanged buffers skipped, exited sessions summarized once. A busy day of summaries costs cents, not dollars.
+- **Cost posture:** max 6 summary calls per tick spent on whoever waited longest, ~120 lines / ~300 output tokens per call, unchanged buffers skipped, exited sessions summarized once (a guarantee that survives restarts and transient API failures). A busy day of summaries costs cents, not dollars.
+- **The board rejects non-localhost Host headers.** It serves terminal output and transcript text; a DNS-rebinding page should read none of it.
+- **`tower config set anthropic_key` prompts with hidden input.** Keys typed as arguments live forever in shell history; the argv form still works for scripts.
+- **Model output is control-stripped before display.** Summaries land in terminals (`tower ls`); a hostile transcript talking the model into emitting escape sequences gets spaces instead.
 
 ## License
 
