@@ -145,22 +145,29 @@ function sortSessions(list) {
 
 async function cmdLs() {
   const reply = await request({ type: 'list' });
+  if (reply.summaries && reply.summaries.error) {
+    console.error(paint(`summaries off: ${reply.summaries.error}`, COLORS.waiting));
+  }
   const list = sortSessions(reply.sessions || []);
   if (list.length === 0) {
     console.log('no sessions. start one with: tower run <command>');
     return;
   }
   const now = Date.now();
+  const showDoing = list.some((s) => s.summary && s.summary.doing);
   const rows = list.map((s) => ({
     name: s.name,
     status: s.status,
     last: s.exited ? fmtDur(now - (s.exitedAt || now)) : fmtDur(now - (s.lastOutputAt || now)),
     pid: String(s.childPid || s.pid || '-'),
     cwd: shortenCwd(s.cwd),
-    command: truncate(s.command, 40),
+    doing: truncate((s.summary && s.summary.doing) || '', 44),
+    command: truncate(s.command, showDoing ? 30 : 40),
   }));
-  const header = { name: 'NAME', status: 'STATUS', last: 'LAST', pid: 'PID', cwd: 'CWD', command: 'COMMAND' };
-  const cols = ['name', 'status', 'last', 'pid', 'cwd', 'command'];
+  const header = { name: 'NAME', status: 'STATUS', last: 'LAST', pid: 'PID', cwd: 'CWD', doing: 'DOING', command: 'COMMAND' };
+  const cols = showDoing
+    ? ['name', 'status', 'last', 'pid', 'cwd', 'doing', 'command']
+    : ['name', 'status', 'last', 'pid', 'cwd', 'command'];
   const width = {};
   for (const c of cols) width[c] = Math.max(header[c].length, ...rows.map((r) => r[c].length));
   const line = (r, colorize) => cols.map((c) => {

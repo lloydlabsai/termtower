@@ -7,6 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const proto = require('./protocol');
+const { createSummarizer } = require('./summarizer');
 
 const WEB_DIR = path.join(__dirname, '..', 'web');
 
@@ -15,6 +16,14 @@ const sessions = new Map(); // id -> session record
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
 }
+
+// The narrative layer: no key configured means this never makes a call and
+// the board behaves exactly as v1.
+const summarizer = createSummarizer({
+  collect: () => sessions.values(),
+  notify: () => notifyChange(),
+  log,
+});
 
 function pidAlive(pid) {
   if (!pid) return false;
@@ -103,6 +112,8 @@ function lightSession(sess, now = Date.now()) {
     pty: sess.pty,
     status: proto.deriveStatus({ ...sess, tailLine }, now),
     tail: tailLine.slice(-160),
+    kind: 'wrapped',
+    summary: sess.summary || null,
   };
 }
 
@@ -219,7 +230,7 @@ const httpServer = http.createServer((req, res) => {
       res.end(data);
     });
   }
-  if (u.pathname === '/api/state') return json(res, 200, { sessions: lightList() });
+  if (u.pathname === '/api/state') return json(res, 200, { sessions: lightList(), summaries: summarizer.meta() });
   if (u.pathname === '/api/events') return serveEvents(req, res);
   const m = u.pathname.match(/^\/api\/session\/([\w-]+)$/);
   if (m) {
@@ -238,7 +249,7 @@ function serveEvents(req, res) {
   });
   res.write(':ok\n\n');
   sseClients.add(res);
-  sseSendTo(res, { type: 'sessions', sessions: lightList() });
+  sseSendTo(res, { type: 'sessions', sessions: lightList(), summaries: summarizer.meta() });
   req.on('close', () => sseClients.delete(res));
 }
 
@@ -257,7 +268,7 @@ function broadcastSessionsSoon() {
   if (sessionsTimer || !sseClients.size) return;
   sessionsTimer = setTimeout(() => {
     sessionsTimer = null;
-    sseBroadcast({ type: 'sessions', sessions: lightList() });
+    sseBroadcast({ type: 'sessions', sessions: lightList(), summaries: summarizer.meta() });
   }, 100);
 }
 
@@ -337,6 +348,7 @@ function loadState() {
       pty: !!s.pty,
       buffer,
       sock: null,
+      summary: s.summary || null,
     };
     if (!sess.exited) {
       if (pidAlive(sess.pid) || pidAlive(sess.childPid)) {
@@ -408,7 +420,7 @@ const server = net.createServer((sock) => {
         proto.send(sock, { type: 'pong', pid: process.pid, port: httpPort });
         break;
       case 'list':
-        proto.send(sock, { type: 'sessions', sessions: lightList() });
+        proto.send(sock, { type: 'sessions', sessions: lightList(), summaries: summarizer.meta() });
         break;
       case 'kill-session':
         proto.send(sock, killSession(String(msg.name || '')));
@@ -534,9 +546,10 @@ function start() {
   loadState();
   claimSocketAndListen(() => {
     startHttp();
+    summarizer.start();
     // Statuses drift with time (running -> idle -> waiting); keep watchers current.
     setInterval(() => {
-      if (sseClients.size) sseBroadcast({ type: 'sessions', sessions: lightList() });
+      if (sseClients.size) sseBroadcast({ type: 'sessions', sessions: lightList(), summaries: summarizer.meta() });
     }, 1000);
     setInterval(cleanupSweep, 30000);
   });

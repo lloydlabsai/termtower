@@ -1,0 +1,211 @@
+'use strict';
+// Full-loop summarizer tests against a local mock of the Anthropic API.
+// TOWER_DIR must be set before any src/ module is required.
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+process.env.TOWER_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tower-sumtest-'));
+delete process.env.ANTHROPIC_API_KEY;
+
+const test = require('node:test');
+const assert = require('node:assert');
+const http = require('http');
+const { createSummarizer, parseSummary, meaningfulLines } = require('../src/summarizer');
+const proto = require('../src/protocol');
+
+function writeConfig(cfg) {
+  fs.mkdirSync(proto.TOWER_DIR, { recursive: true });
+  fs.writeFileSync(proto.configPath(), JSON.stringify(cfg));
+}
+
+function fakeSession(over = {}) {
+  return {
+    id: 'x', name: 'vite-dev', cwd: '/tmp/app', command: 'npm run dev',
+    exited: false, exitCode: null, summary: null,
+    buffer: { toLines: () => over.lines || ['starting dev server', 'listening on :5173', 'compiled ok in 300ms'] },
+    ...over,
+  };
+}
+
+// A controllable stand-in for the Messages API.
+function mockApi() {
+  const state = { calls: 0, status: 200, text: JSON.stringify({ doing: 'serving the app', last: 'compiled ok', next: 'probably keep watching' }), bodies: [] };
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (d) => { raw += d; });
+    req.on('end', () => {
+      state.calls++;
+      state.bodies.push(JSON.parse(raw));
+      if (state.status !== 200) {
+        res.writeHead(state.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { type: 'x', message: 'mock says no' } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ content: [{ type: 'text', text: state.text }] }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      process.env.TOWER_ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.address().port}`;
+      resolve({ state, close: () => new Promise((r) => server.close(r)) });
+    });
+  });
+}
+
+function makeSummarizer() {
+  const notes = { notified: 0, logs: [] };
+  const sessions = [];
+  const s = createSummarizer({
+    collect: () => sessions,
+    notify: () => notes.notified++,
+    log: (m) => notes.logs.push(m),
+  });
+  return { s, sessions, notes };
+}
+
+test('parseSummary: strict, fenced, and hostile inputs', () => {
+  assert.deepStrictEqual(
+    parseSummary('{"doing":"a","last":"b","next":"c"}'),
+    { doing: 'a', last: 'b', next: 'c' });
+  assert.deepStrictEqual(
+    parseSummary('Sure! ```json\n{"doing":"a","last":"b","next":"c"}\n```'),
+    { doing: 'a', last: 'b', next: 'c' });
+  assert.strictEqual(parseSummary('{"doing":"a","last":"b"}'), null);
+  assert.strictEqual(parseSummary('not json at all'), null);
+  assert.strictEqual(parseSummary(''), null);
+  const long = parseSummary(JSON.stringify({ doing: 'x'.repeat(500), last: 'b', next: 'c' }));
+  assert.ok(long.doing.length <= 160);
+});
+
+test('meaningfulLines drops noise and collapses heartbeats', () => {
+  const lines = meaningfulLines([
+    '', '=====', '[====>    ] 42%', '   ',
+    'GET /health 200', 'GET /health 200', 'GET /health 200',
+    'error: connection refused',
+  ]);
+  assert.deepStrictEqual(lines, ['GET /health 200', 'error: connection refused']);
+});
+
+test('happy path: changed session gets a summary, unchanged session does not repeat', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    const { s, sessions, notes } = makeSummarizer();
+    const sess = fakeSession();
+    sessions.push(sess);
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+    assert.strictEqual(sess.summary.doing, 'serving the app');
+    assert.ok(sess.summary.summarizedAt > 0);
+    assert.ok(notes.notified >= 1);
+    // request carried the session context and the output
+    const body = api.state.bodies[0];
+    assert.ok(body.max_tokens <= 300);
+    assert.match(body.messages[0].content, /vite-dev/);
+    assert.match(body.messages[0].content, /compiled ok/);
+    // same buffer, next tick: no new call
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+  } finally { await api.close(); }
+});
+
+test('continuity: previous summary is sent along with new output', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    const { s, sessions } = makeSummarizer();
+    const sess = fakeSession({ summary: { doing: 'old story', last: 'x', next: 'y', summarizedAt: 1 } });
+    sess.buffer.toLines = () => ['brand new line one', 'brand new line two', 'brand new line three'];
+    sessions.push(sess);
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+    assert.match(api.state.bodies[0].messages[0].content, /old story/);
+  } finally { await api.close(); }
+});
+
+test('malformed model output keeps the previous summary and does not thrash', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    const { s, sessions, notes } = makeSummarizer();
+    const prev = { doing: 'the old truth', last: 'l', next: 'n', summarizedAt: 1 };
+    const sess = fakeSession({ summary: { ...prev } });
+    sessions.push(sess);
+    api.state.text = 'I cannot answer in JSON today.';
+    await s._tick();
+    assert.strictEqual(sess.summary.doing, 'the old truth');
+    assert.ok(notes.logs.some((l) => /malformed/.test(l)));
+    // same content is not retried next tick
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+  } finally { await api.close(); }
+});
+
+test('invalid key: one clear error, then no calls until the key changes', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-badbadbadbadbadbadbadbad' });
+    const { s, sessions } = makeSummarizer();
+    sessions.push(fakeSession());
+    api.state.status = 401;
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+    assert.match(s.meta().error, /key rejected/i);
+    assert.strictEqual(s.meta().on, false);
+    // still latched
+    sessions[0].buffer.toLines = () => ['totally new output', 'more new output', 'even more'];
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+    // key change clears the latch
+    api.state.status = 200;
+    writeConfig({ anthropic_key: 'sk-test-goodgoodgoodgoodgoodgood' });
+    await s._tick();
+    assert.strictEqual(api.state.calls, 2);
+    assert.strictEqual(s.meta().error, null);
+  } finally { await api.close(); }
+});
+
+test('network down: quiet backoff, session state untouched', async () => {
+  const api = await mockApi();
+  await api.close(); // server gone = connection refused
+  writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+  const { s, sessions, notes } = makeSummarizer();
+  const sess = fakeSession();
+  sessions.push(sess);
+  await s._tick();
+  assert.strictEqual(sess.summary, null);
+  assert.strictEqual(sess.exited, false);
+  assert.ok(notes.logs.some((l) => /backing off/.test(l)));
+  assert.strictEqual(s.meta().error, null); // transient, not surfaced as config trouble
+});
+
+test('exited session is summarized once with the exit noted, then left alone', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    const { s, sessions } = makeSummarizer();
+    const sess = fakeSession({ exited: true, exitCode: 2, lines: ['test run started', '3 passed, 1 failed', 'FAIL src/app.test.js'] });
+    sessions.push(sess);
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+    assert.match(api.state.bodies[0].messages[0].content, /exited \(code 2\)/);
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+  } finally { await api.close(); }
+});
+
+test('no key or summaries disabled: never calls, never errors', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({});
+    const { s, sessions } = makeSummarizer();
+    sessions.push(fakeSession());
+    await s._tick();
+    assert.strictEqual(api.state.calls, 0);
+    assert.strictEqual(s.meta().on, false);
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa', summaries: { enabled: false } });
+    await s._tick();
+    assert.strictEqual(api.state.calls, 0);
+  } finally { await api.close(); }
+});

@@ -21,7 +21,9 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const TOWER_DIR = path.join(os.homedir(), '.tower');
+// TOWER_DIR env override is a test seam (temp state dirs, parallel daemons);
+// normal installs never set it.
+const TOWER_DIR = process.env.TOWER_DIR ? path.resolve(process.env.TOWER_DIR) : path.join(os.homedir(), '.tower');
 const DEFAULT_PORT = 8697; // "T-O-W-R" on a phone keypad
 
 const IDLE_AFTER_MS = 15000;      // alive but quiet this long -> idle
@@ -40,7 +42,10 @@ function ensureTowerDir() {
 
 function socketPath() {
   if (process.platform === 'win32') {
-    return `\\\\.\\pipe\\tower-${os.userInfo().username}`;
+    // An overridden TOWER_DIR gets its own pipe so a test daemon cannot
+    // collide with the real one.
+    const suffix = process.env.TOWER_DIR ? '-' + Buffer.from(TOWER_DIR).toString('hex').slice(-12) : '';
+    return `\\\\.\\pipe\\tower-${os.userInfo().username}${suffix}`;
   }
   return path.join(TOWER_DIR, 'towerd.sock');
 }

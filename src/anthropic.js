@@ -4,10 +4,14 @@
 // second for what amounts to a single POST endpoint. The user brings their
 // own key; nothing else is ever sent anywhere.
 
-// The env override exists for tests (point at a local mock); it is not a
-// supported way to send transcripts anywhere other than Anthropic.
-const API_URL = (process.env.TOWER_ANTHROPIC_BASE_URL || 'https://api.anthropic.com') + '/v1/messages';
 const API_VERSION = '2023-06-01';
+
+// The env override exists for tests (point at a local mock); it is not a
+// supported way to send transcripts anywhere other than Anthropic. Read per
+// call so a mock server on an ephemeral port can be set up after require.
+function apiUrl() {
+  return (process.env.TOWER_ANTHROPIC_BASE_URL || 'https://api.anthropic.com') + '/v1/messages';
+}
 
 // Resolves with the parsed response body; rejects with err.status set for
 // HTTP errors so callers can tell an invalid key (401) from a flaky network.
@@ -16,7 +20,7 @@ async function createMessage({ apiKey, model, maxTokens, system, messages, timeo
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
   try {
-    res = await fetch(API_URL, {
+    res = await fetch(apiUrl(), {
       method: 'POST',
       signal: ctrl.signal,
       headers: {
