@@ -285,10 +285,91 @@ function startHttp() {
   httpServer.listen(proto.DEFAULT_PORT, '127.0.0.1');
 }
 
+// ---------- persistence: a daemon restart is not amnesia ----------
+
+let saveTimer = null;
+
+function saveStateSoon() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(saveStateNow, 1000);
+  if (saveTimer.unref) saveTimer.unref();
+}
+
+function saveStateNow() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  const data = {
+    savedAt: Date.now(),
+    sessions: [...sessions.values()].map((s) => ({ ...lightSession(s), lines: s.buffer.toLines() })),
+  };
+  try { fs.writeFileSync(proto.statePath(), JSON.stringify(data)); } catch { /* best effort */ }
+}
+
+function loadState() {
+  let data = null;
+  try { data = JSON.parse(fs.readFileSync(proto.statePath(), 'utf8')); } catch { return; }
+  const now = Date.now();
+  for (const s of data.sessions || []) {
+    if (!s || typeof s.id !== 'string') continue;
+    const buffer = new RingBuffer();
+    buffer.loadLines(s.lines);
+    const sess = {
+      id: s.id,
+      name: String(s.name || 'session'),
+      cwd: String(s.cwd || ''),
+      command: String(s.command || ''),
+      pid: s.pid,
+      childPid: s.childPid,
+      startedAt: s.startedAt,
+      lastOutputAt: s.lastOutputAt,
+      exited: !!s.exited,
+      exitCode: typeof s.exitCode === 'number' ? s.exitCode : null,
+      exitSignal: s.exitSignal || null,
+      exitedAt: s.exitedAt || null,
+      stale: false,
+      pty: !!s.pty,
+      buffer,
+      sock: null,
+    };
+    if (!sess.exited) {
+      if (pidAlive(sess.pid) || pidAlive(sess.childPid)) {
+        // Its wrapper is alive and will reconnect within a few seconds.
+        sess.stale = true;
+      } else {
+        sess.exited = true;
+        sess.exitCode = null;
+        sess.exitedAt = data.savedAt || now;
+      }
+    }
+    if (sess.exited && now - (sess.exitedAt || 0) > proto.EXITED_TTL_MS) continue;
+    sessions.set(sess.id, sess);
+  }
+  if (sessions.size) log(`restored ${sessions.size} session(s) from ${proto.statePath()}`);
+}
+
+// Stale sessions whose processes are gone become exited; old exited cards expire.
+function cleanupSweep() {
+  const now = Date.now();
+  let changed = false;
+  for (const [id, s] of sessions) {
+    if (!s.exited && s.stale && !pidAlive(s.pid) && !pidAlive(s.childPid)) {
+      s.exited = true;
+      s.exitCode = null;
+      s.exitedAt = now;
+      changed = true;
+    }
+    if (s.exited && now - (s.exitedAt || 0) > proto.EXITED_TTL_MS) {
+      sessions.delete(id);
+      changed = true;
+    }
+  }
+  if (changed) notifyChange();
+}
+
 // ---------- change notification ----------
 
 function notifyChange() {
   broadcastSessionsSoon();
+  saveStateSoon();
 }
 
 // ---------- socket server ----------
@@ -338,6 +419,7 @@ const server = net.createServer((sock) => {
 });
 
 function shutdown(code) {
+  saveStateNow();
   try { server.close(); } catch { /* already closed */ }
   try { httpServer.close(); } catch { /* already closed */ }
   for (const res of sseClients) { try { res.end(); } catch { /* fine */ } }
@@ -379,12 +461,14 @@ function claimSocketAndListen(onReady) {
 
 function start() {
   proto.ensureTowerDir();
+  loadState();
   claimSocketAndListen(() => {
     startHttp();
     // Statuses drift with time (running -> idle -> waiting); keep watchers current.
     setInterval(() => {
       if (sseClients.size) sseBroadcast({ type: 'sessions', sessions: lightList() });
     }, 1000);
+    setInterval(cleanupSweep, 30000);
   });
   process.on('SIGTERM', () => shutdown(0));
   process.on('SIGINT', () => shutdown(0));
