@@ -104,6 +104,12 @@ tower config unset <key>                        remove a value
 
 That is the whole surface.
 
+## The inbox
+
+Sessions can leave each other notes. `tower send vite-dev "schema migration done"` queues a message; the card grows a quiet unread badge; `tower inbox` inside that session reads and drains it. Nothing is ever injected into any terminal - delivery ends at the mailbox, and reading is the recipient's choice. Messages evaporate after `inbox.ttl_hours` (default 24h), capped at `inbox.cap` per inbox (default 100).
+
+Built for parallel agents: see **[docs/AGENTS.md](docs/AGENTS.md)** for the copy-paste CLAUDE.md block that makes Claude Code sessions coordinate through it.
+
 ## Search
 
 "Which terminal had that error?" Press `/` on the board and type; cards filter live to sessions whose name, path, command, narrative, or recent output match, with the hits highlighted. `Esc` clears. The same search is `tower search <text>` in the terminal (alias: `tower grep`). Case-insensitive substring, on purpose - it is a status board, not a log archive; only what the ring buffers and recent transcript turns still hold is searchable.

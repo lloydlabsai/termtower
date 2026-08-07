@@ -215,7 +215,47 @@
     margin-left: 8px;
     transform: translateY(-2px);
   }
+  .mail-badge {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    font-weight: 600;
+    color: var(--bg);
+    background: var(--waiting);
+    border-radius: 8px;
+    padding: 1px 6px;
+    margin-left: 8px;
+    transform: translateY(-2px);
+  }
   .status-row { margin-top: 3px; }
+
+  /* read-only inbox view inside an expanded card */
+  .mailbox {
+    display: none;
+    margin-top: 10px;
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .card.expanded .mailbox.has-mail { display: block; }
+  .mail-title {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin-bottom: 4px;
+  }
+  .mail-row {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    margin: 3px 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .mail-row .from { color: var(--running); }
+  .mail-row .when { color: var(--text-faint); }
   .meta {
     font-family: var(--mono);
     font-size: 11px;
@@ -476,7 +516,10 @@ function makeCard(s) {
   badge.className = 'badge';
   badge.textContent = 'agent';
   badge.hidden = true;
-  name.append(nameText, badge);
+  const mailBadge = document.createElement('span');
+  mailBadge.className = 'mail-badge';
+  mailBadge.hidden = true;
+  name.append(nameText, badge, mailBadge);
   const ago = document.createElement('span');
   ago.className = 'ago';
   const agoNum = document.createElement('span');
@@ -538,10 +581,12 @@ function makeCard(s) {
   tail.className = 'tail';
   const hits = document.createElement('div');
   hits.className = 'hits';
+  const mailbox = document.createElement('div');
+  mailbox.className = 'mailbox';
   const output = document.createElement('pre');
   output.className = 'output';
 
-  el.append(head, statusRow, meta, story, tail, hits, output);
+  el.append(head, statusRow, meta, story, tail, hits, mailbox, output);
 
   el.addEventListener('click', (e) => {
     if (output.contains(e.target)) return; // let people select text
@@ -556,7 +601,33 @@ function makeCard(s) {
     }
   });
 
-  return { el, refs: { statusLabelEl, agoNum, agoSub, nameText, badge, cwd, cmd, branchSep, branch, doing, last, next, storyAge, tail, hits, output } };
+  return { el, refs: { statusLabelEl, agoNum, agoSub, nameText, badge, mailBadge, cwd, cmd, branchSep, branch, doing, last, next, storyAge, tail, hits, mailbox, output } };
+}
+
+// Read-only queue view; draining is the session's own business (tower inbox).
+function setMail(entry, mail) {
+  const box = entry.refs.mailbox;
+  box.textContent = '';
+  const messages = mail || [];
+  box.classList.toggle('has-mail', messages.length > 0);
+  if (!messages.length) return;
+  const title = document.createElement('div');
+  title.className = 'mail-title';
+  title.textContent = `inbox (${messages.length})`;
+  box.append(title);
+  const now = Date.now();
+  for (const m of messages) {
+    const row = document.createElement('div');
+    row.className = 'mail-row';
+    const from = document.createElement('span');
+    from.className = 'from';
+    from.textContent = m.from;
+    const when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = ' · ' + fmtAgoCoarse(now - m.ts);
+    row.append(from, when, document.createTextNode('  ' + m.payload));
+    box.append(row);
+  }
 }
 
 // XSS-safe highlighter: text nodes with <mark> around case-insensitive hits.
@@ -592,6 +663,9 @@ function updateCard(entry, s, now) {
   refs.nameText.textContent = s.name;
   refs.nameText.title = s.name || '';
   refs.badge.hidden = s.kind !== 'claude';
+  // queued messages are a quiet chip, never an attention-band event
+  refs.mailBadge.hidden = !s.unread;
+  if (s.unread) refs.mailBadge.textContent = '✉ ' + s.unread;
   refs.cwd.textContent = shortenCwd(s.cwd);
   refs.cmd.textContent = s.command;
   refs.cmd.title = s.command || '';
@@ -641,7 +715,10 @@ async function fetchOutput(id) {
       const data = await r.json();
       state.outputs.set(id, data.lines || []);
       const entry = cards.get(id);
-      if (entry && state.expandedId === id) setOutput(entry, data.lines);
+      if (entry && state.expandedId === id) {
+        setOutput(entry, data.lines);
+        setMail(entry, data.mail);
+      }
     }
   } catch { /* the SSE stream will fill it in */ }
 }

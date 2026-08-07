@@ -35,6 +35,8 @@ usage:
   tower run [--name <name>] <command> [args...]   wrap a command so it shows on the board
   tower ls                                        list sessions in the terminal
   tower search <text>                             find it across every session's recent output
+  tower send <session|all> <text>                 leave a note in a session's inbox (--event to tag it)
+  tower inbox [--name <session>] [--peek]         read (and drain) an inbox; inside tower run, infers self
   tower open                                      open the status board in a browser
   tower kill <name>                               stop a session (or "daemon" to stop towerd)
   tower config get [key]                          show configuration (secrets masked)
@@ -298,6 +300,60 @@ async function cmdSearch(argv) {
   }
 }
 
+// ---------- inbox ----------
+
+async function cmdSend(argv) {
+  let msgType = 'note';
+  const rest = [];
+  for (const a of argv) {
+    if (a === '--event') { msgType = 'event'; continue; }
+    rest.push(a);
+  }
+  const to = rest[0];
+  const payload = rest.slice(1).join(' ');
+  if (!to || !payload) usage();
+  const from = process.env.TOWER_SESSION || 'cli';
+  const reply = await request({ type: 'post', from, to, msgType, payload });
+  if (reply.type === 'ok') console.log(`delivered to ${reply.delivered} inbox${reply.delivered === 1 ? '' : 'es'}`);
+  else {
+    console.error(`tower: ${reply.message}`);
+    process.exitCode = 1;
+  }
+}
+
+async function cmdInbox(argv) {
+  let name = null;
+  let peek = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--name' || argv[i] === '-n') name = argv[++i];
+    else if (argv[i] === '--peek') peek = true;
+    else usage();
+  }
+  if (!name) name = process.env.TOWER_SESSION;
+  if (!name) {
+    console.error('tower: not inside a tower session; say whose inbox with --name <session>');
+    process.exit(1);
+  }
+  const reply = await request({ type: 'fetch', name, peek });
+  if (reply.type === 'error') {
+    console.error(`tower: ${reply.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const messages = reply.messages || [];
+  if (messages.length === 0) {
+    console.log('inbox empty');
+    return;
+  }
+  const now = Date.now();
+  for (const m of messages) {
+    const tag = m.type === 'event' ? paint('[event]', COLORS.waiting) : paint('[note]', DIM);
+    console.log(`${tag} ${paint(m.from, COLORS.running)} ${paint(fmtDur(now - m.ts) + ' ago', DIM)}`);
+    console.log(`  ${m.payload}`);
+  }
+  if (peek) console.log(paint(`(${messages.length} message${messages.length === 1 ? '' : 's'} left in the inbox)`, DIM));
+}
+
 // ---------- config ----------
 
 const SECRET_KEY_RE = /key|token|secret/i;
@@ -462,6 +518,8 @@ async function main() {
     case 'run': return cmdRun(args);
     case 'ls': case 'list': return cmdLs();
     case 'search': case 'grep': return cmdSearch(args);
+    case 'send': return cmdSend(args);
+    case 'inbox': return cmdInbox(args);
     case 'open': return cmdOpen();
     case 'kill': return cmdKill(args[0]);
     case 'config': return cmdConfig(args);

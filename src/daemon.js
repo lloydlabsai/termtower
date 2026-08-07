@@ -10,6 +10,7 @@ const proto = require('./protocol');
 const config = require('./config');
 const { createSummarizer } = require('./summarizer');
 const { createClaudeWatch, deriveClaudeStatus } = require('./claudewatch');
+const { createMailroom } = require('./mailroom');
 
 const WEB_DIR = path.join(__dirname, '..', 'web');
 
@@ -24,6 +25,30 @@ const claudeWatch = createClaudeWatch({
   notify: () => notifyChange(),
   log,
 });
+
+// Session messaging: daemon as mailbox, agents as opt-in readers.
+const mailroom = createMailroom({ log });
+
+// "vite-dev", a session id, a cc- transcript id, or "all" -> session ids.
+// Unknown names are an error, not a silent drop.
+function resolveRecipients(spec) {
+  const wanted = String(spec || '').trim();
+  if (!wanted) return { error: 'no recipient given' };
+  const live = [];
+  for (const s of sessions.values()) if (!s.exited) live.push(s);
+  const agents = [...claudeWatch.records()];
+  if (wanted === 'all') {
+    return { ids: [...live.map((s) => s.id), ...agents.map((r) => r.id)] };
+  }
+  const ids = [];
+  for (const part of wanted.split(',').map((p) => p.trim()).filter(Boolean)) {
+    const hit = live.find((s) => s.name === part || s.id === part)
+      || agents.find((r) => r.name === part || r.id === part);
+    if (!hit) return { error: `no live session named "${part}"` };
+    ids.push(hit.id);
+  }
+  return { ids };
+}
 
 // The narrative layer: no key configured means this never makes a call and
 // the board behaves exactly as v1. Wrappers claimed by a transcript card are
@@ -122,6 +147,7 @@ function lightSession(sess, now = Date.now()) {
     tail: tailLine.slice(-160),
     kind: 'wrapped',
     summary: sess.summary || null,
+    unread: mailroom.unread(sess.id),
   };
 }
 
@@ -147,6 +173,7 @@ function lightClaude(rec, now = Date.now()) {
     kind: 'claude',
     gitBranch: rec.gitBranch || null,
     summary: rec.summary || null,
+    unread: mailroom.unread(rec.id),
   };
 }
 
@@ -419,14 +446,15 @@ const httpServer = http.createServer((req, res) => {
   if (u.pathname === '/api/events') return serveEvents(req, res);
   const m = u.pathname.match(/^\/api\/session\/([\w-]+)$/);
   if (m) {
+    // the board reads mailboxes without draining; only a fetch drains
     const cc = claudeWatch.get(m[1]);
     if (cc) {
       const lines = (cc.turns || []).flatMap((t) => [`${t.role}:`, ...t.text.split('\n'), '']);
-      return json(res, 200, { ...lightClaude(cc), lines });
+      return json(res, 200, { ...lightClaude(cc), lines, mail: mailroom.fetch(cc.id, { peek: true }) });
     }
     const sess = sessions.get(m[1]);
     if (!sess) return json(res, 404, { error: 'no such session' });
-    return json(res, 200, { ...lightSession(sess), lines: sess.buffer.toLines() });
+    return json(res, 200, { ...lightSession(sess), lines: sess.buffer.toLines(), mail: mailroom.fetch(sess.id, { peek: true }) });
   }
   return json(res, 404, { error: 'not found' });
 });
@@ -512,6 +540,8 @@ function saveStateNow() {
       ...lightSession(s),
       lines: s.buffer.toLines(),
       killRequestedAt: s.killRequestedAt || null,
+      // unread is derived, not state; it rides in via lightSession but is
+      // ignored on load (the mailroom owns the truth)
       // summarizer bookkeeping rides along so a restart never re-bills an
       // unchanged session or repeats a done exit pass (board payloads via
       // lightSession never carry these)
@@ -519,6 +549,7 @@ function saveStateNow() {
       summaryExitDone: !!(s.summaryCtl && s.summaryCtl.exitDone),
     })),
     claude: claudeWatch.persistable(),
+    mail: mailroom.persistable(),
   };
   try { fs.writeFileSync(proto.statePath(), JSON.stringify(data), { mode: 0o600 }); } catch { /* best effort */ }
 }
@@ -527,6 +558,7 @@ function loadState() {
   let data = null;
   try { data = JSON.parse(fs.readFileSync(proto.statePath(), 'utf8')); } catch { return; }
   claudeWatch.restore(data.claude);
+  mailroom.restore(data.mail);
   const now = Date.now();
   for (const s of data.sessions || []) {
     if (!s || typeof s.id !== 'string') continue;
@@ -593,6 +625,8 @@ function cleanupSweep() {
       }
     }
   }
+  mailroom.sweep(now);
+  mailroom.retain(new Set([...sessions.keys(), ...[...claudeWatch.records()].map((r) => r.id)]));
   if (changed) notifyChange();
 }
 
@@ -639,6 +673,22 @@ const server = net.createServer((sock) => {
       case 'search':
         proto.send(sock, { type: 'results', results: searchSessions(String(msg.q || '')) });
         break;
+      case 'post': {
+        const r = resolveRecipients(msg.to);
+        if (r.error) { proto.send(sock, { type: 'error', message: r.error }); break; }
+        const delivered = mailroom.post({ from: msg.from, recipients: r.ids, type: msg.msgType, payload: msg.payload });
+        proto.send(sock, { type: 'ok', delivered });
+        notifyChange();
+        break;
+      }
+      case 'fetch': {
+        const r = resolveRecipients(msg.name);
+        if (r.error || r.ids.length !== 1) { proto.send(sock, { type: 'error', message: r.error || 'fetch takes exactly one session' }); break; }
+        const messages = mailroom.fetch(r.ids[0], { peek: !!msg.peek });
+        proto.send(sock, { type: 'inbox', messages });
+        if (messages.length && !msg.peek) notifyChange();
+        break;
+      }
       case 'shutdown':
         proto.send(sock, { type: 'ok' });
         log('shutdown requested');

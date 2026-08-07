@@ -104,7 +104,9 @@ function run(argv, opts = {}) {
         cols: process.stdout.columns || 80,
         rows: process.stdout.rows || 24,
         cwd: process.cwd(),
-        env: process.env,
+        // the child can find its own mailbox: `tower inbox` / `tower send`
+        // infer identity from TOWER_SESSION (the stable id, names get deduped)
+        env: { ...process.env, TOWER_SESSION: session.id },
       });
       usingPty = true;
     } catch { child = null; }
@@ -117,9 +119,13 @@ function run(argv, opts = {}) {
         shell: true,
         stdio: ['inherit', 'pipe', 'pipe'],
         windowsHide: true,
+        env: { ...process.env, TOWER_SESSION: session.id },
       });
     } else {
-      child = cp.spawn(argv[0], argv.slice(1), { stdio: ['inherit', 'pipe', 'pipe'] });
+      child = cp.spawn(argv[0], argv.slice(1), {
+        stdio: ['inherit', 'pipe', 'pipe'],
+        env: { ...process.env, TOWER_SESSION: session.id },
+      });
     }
   }
   session.childPid = child.pid;
