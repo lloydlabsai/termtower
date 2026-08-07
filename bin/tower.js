@@ -189,11 +189,13 @@ async function cmdRun(argv) {
 }
 
 async function cmdOpen() {
-  await request({ type: 'ping' });
-  let port = proto.DEFAULT_PORT;
+  const pong = await request({ type: 'ping' });
+  let port = pong.port || proto.DEFAULT_PORT;
   try {
-    const info = JSON.parse(fs.readFileSync(proto.daemonInfoPath(), 'utf8'));
-    if (info.port) port = info.port;
+    if (!pong.port) {
+      const info = JSON.parse(fs.readFileSync(proto.daemonInfoPath(), 'utf8'));
+      if (info.port) port = info.port;
+    }
   } catch { /* fall back to default */ }
   const url = `http://127.0.0.1:${port}/`;
   const platform = process.platform;

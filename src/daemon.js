@@ -3,8 +3,12 @@
 // for wrappers and CLI clients, and serves the status board over localhost HTTP.
 
 const net = require('net');
+const http = require('http');
 const fs = require('fs');
+const path = require('path');
 const proto = require('./protocol');
+
+const WEB_DIR = path.join(__dirname, '..', 'web');
 
 const sessions = new Map(); // id -> session record
 
@@ -186,14 +190,105 @@ function killSession(name) {
   return { type: 'ok', name: target.name };
 }
 
-// ---------- change notification (persistence + board updates hook in later) ----------
+// ---------- status board: localhost HTTP + server-sent events ----------
 
-function notifyChange() {
-  // Extended by later build steps (state persistence, SSE broadcast).
+let httpPort = null;
+const sseClients = new Set();
+
+function json(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+  res.end(body);
 }
 
-function outputChanged(_id) {
-  // Extended by the status board step (per-session SSE output events).
+const httpServer = http.createServer((req, res) => {
+  const u = new URL(req.url, 'http://127.0.0.1');
+  if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
+  if (u.pathname === '/') {
+    return fs.readFile(path.join(WEB_DIR, 'index.html'), (err, data) => {
+      if (err) return json(res, 500, { error: 'board page missing' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(data);
+    });
+  }
+  if (u.pathname === '/api/state') return json(res, 200, { sessions: lightList() });
+  if (u.pathname === '/api/events') return serveEvents(req, res);
+  const m = u.pathname.match(/^\/api\/session\/([\w-]+)$/);
+  if (m) {
+    const sess = sessions.get(m[1]);
+    if (!sess) return json(res, 404, { error: 'no such session' });
+    return json(res, 200, { ...lightSession(sess), lines: sess.buffer.toLines() });
+  }
+  return json(res, 404, { error: 'not found' });
+});
+
+function serveEvents(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(':ok\n\n');
+  sseClients.add(res);
+  sseSendTo(res, { type: 'sessions', sessions: lightList() });
+  req.on('close', () => sseClients.delete(res));
+}
+
+function sseSendTo(res, obj) {
+  res.write(`data: ${JSON.stringify(obj)}\n\n`);
+}
+
+function sseBroadcast(obj) {
+  if (!sseClients.size) return;
+  const frame = `data: ${JSON.stringify(obj)}\n\n`;
+  for (const res of sseClients) res.write(frame);
+}
+
+let sessionsTimer = null;
+function broadcastSessionsSoon() {
+  if (sessionsTimer || !sseClients.size) return;
+  sessionsTimer = setTimeout(() => {
+    sessionsTimer = null;
+    sseBroadcast({ type: 'sessions', sessions: lightList() });
+  }, 100);
+}
+
+const outputTimers = new Map();
+function outputChanged(id) {
+  if (!sseClients.size || outputTimers.has(id)) return;
+  outputTimers.set(id, setTimeout(() => {
+    outputTimers.delete(id);
+    const sess = sessions.get(id);
+    if (sess) sseBroadcast({ type: 'output', id, lines: sess.buffer.toLines() });
+  }, 150));
+}
+
+function startHttp() {
+  let fellBack = false;
+  httpServer.on('error', (e) => {
+    if (e.code === 'EADDRINUSE' && !fellBack) {
+      fellBack = true;
+      log(`port ${proto.DEFAULT_PORT} is taken, falling back to an ephemeral port`);
+      httpServer.listen(0, '127.0.0.1');
+    } else {
+      log('http server error:', e.message);
+      process.exit(1);
+    }
+  });
+  httpServer.on('listening', () => {
+    httpPort = httpServer.address().port;
+    try {
+      fs.writeFileSync(proto.daemonInfoPath(), JSON.stringify({ pid: process.pid, port: httpPort, startedAt: Date.now() }));
+    } catch (e) { log('could not write daemon.json:', e.message); }
+    log(`status board on http://127.0.0.1:${httpPort}/`);
+  });
+  httpServer.listen(proto.DEFAULT_PORT, '127.0.0.1');
+}
+
+// ---------- change notification ----------
+
+function notifyChange() {
+  broadcastSessionsSoon();
 }
 
 // ---------- socket server ----------
@@ -220,7 +315,7 @@ const server = net.createServer((sock) => {
         handleExit(msg);
         break;
       case 'ping':
-        proto.send(sock, { type: 'pong', pid: process.pid, port: null });
+        proto.send(sock, { type: 'pong', pid: process.pid, port: httpPort });
         break;
       case 'list':
         proto.send(sock, { type: 'sessions', sessions: lightList() });
@@ -244,6 +339,9 @@ const server = net.createServer((sock) => {
 
 function shutdown(code) {
   try { server.close(); } catch { /* already closed */ }
+  try { httpServer.close(); } catch { /* already closed */ }
+  for (const res of sseClients) { try { res.end(); } catch { /* fine */ } }
+  try { fs.unlinkSync(proto.daemonInfoPath()); } catch { /* fine */ }
   removeSocketFile();
   process.exit(code);
 }
@@ -254,7 +352,7 @@ function removeSocketFile() {
   }
 }
 
-function claimSocketAndListen() {
+function claimSocketAndListen(onReady) {
   const sp = proto.socketPath();
   // If another daemon is alive, bow out quietly.
   const probe = net.createConnection(sp);
@@ -272,13 +370,22 @@ function claimSocketAndListen() {
       log('socket server error:', e.message);
       process.exit(1);
     });
-    server.listen(sp, () => log(`towerd listening on ${sp}`));
+    server.listen(sp, () => {
+      log(`towerd listening on ${sp}`);
+      onReady();
+    });
   });
 }
 
 function start() {
   proto.ensureTowerDir();
-  claimSocketAndListen();
+  claimSocketAndListen(() => {
+    startHttp();
+    // Statuses drift with time (running -> idle -> waiting); keep watchers current.
+    setInterval(() => {
+      if (sseClients.size) sseBroadcast({ type: 'sessions', sessions: lightList() });
+    }, 1000);
+  });
   process.on('SIGTERM', () => shutdown(0));
   process.on('SIGINT', () => shutdown(0));
   process.on('exit', removeSocketFile);

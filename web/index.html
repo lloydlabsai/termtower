@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tower</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230E1420'/%3E%3Cpath d='M8 3 L11 11 H5 Z' fill='%23F5C544'/%3E%3Crect x='7.25' y='11' width='1.5' height='2' fill='%238292AB'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0E1420;
+    --surface: #151D2C;
+    --surface-deep: #0A0F17;
+    --border: #232E42;
+    --border-soft: #1B2536;
+    --text: #D6DEEC;
+    --text-dim: #8292AB;
+    --text-faint: #5B6980;
+    --running: #3FCF8E;
+    --waiting: #F5C544;
+    --error: #F0716A;
+    --idle: #7C8DA8;
+    --gone: #66748C;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.45;
+    min-height: 100vh;
+    padding: 0 22px 40px;
+  }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    padding: 18px 2px 14px;
+    border-bottom: 1px solid var(--border-soft);
+    margin-bottom: 20px;
+  }
+  .wordmark {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.42em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  .wordmark .beacon { color: var(--waiting); }
+  .counts {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-dim);
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .counts .zero { color: var(--text-faint); }
+  .counts b { font-weight: 600; color: var(--text); }
+  .counts .need b { color: var(--waiting); }
+  header .right {
+    margin-left: auto;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
+  .conn { display: inline-flex; align-items: center; gap: 6px; }
+  .conn-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--running);
+    align-self: center;
+  }
+  .conn.down .conn-dot { background: var(--error); }
+  #clock { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+  /* ---------- bands ---------- */
+  .band-label {
+    font-family: var(--sans);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 22px 0 10px;
+  }
+  .band-label.attention { color: var(--waiting); }
+  .band-label::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+  .band-label.attention::after { background: color-mix(in srgb, var(--waiting) 26%, var(--bg)); }
+  .band-label .n { font-family: var(--mono); letter-spacing: 0; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 12px;
+  }
+
+  /* ---------- cards ---------- */
+  .card {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px 12px 18px;
+    cursor: pointer;
+    overflow: hidden;
+  }
+  .card:hover { border-color: #2E3C57; }
+  .card:focus-visible { outline: 2px solid var(--idle); outline-offset: 2px; }
+  .card::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: var(--gone);
+  }
+  .card[data-status="running"]::before { background: var(--running); }
+  .card[data-status="waiting"]::before { background: var(--waiting); }
+  .card[data-status="exited-error"]::before { background: var(--error); }
+  .card[data-status="idle"]::before { background: var(--idle); }
+  .card[data-status="idle"], .card[data-status="stale"],
+  .card[data-status="exited-ok"], .card[data-status="exited-unknown"] { opacity: 0.78; }
+  .card:hover, .card.expanded { opacity: 1; }
+  .card.expanded { grid-column: 1 / -1; cursor: default; }
+
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gone); flex: none; }
+  [data-status="running"] .dot { background: var(--running); }
+  [data-status="waiting"] .dot { background: var(--waiting); }
+  [data-status="exited-error"] .dot { background: var(--error); }
+  [data-status="idle"] .dot { background: var(--idle); }
+  [data-status="waiting"] .status, [data-status="waiting"] .ago-num { color: var(--waiting); }
+  [data-status="exited-error"] .status, [data-status="exited-error"] .ago-num { color: var(--error); }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+  [data-status="waiting"] .dot { animation: pulse 1.6s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { [data-status="waiting"] .dot { animation: none; } }
+
+  /* the flight-board datum: how long since this session spoke */
+  .ago { text-align: right; flex: none; }
+  .ago-num {
+    display: block;
+    font-family: var(--mono);
+    font-size: 17px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    line-height: 1.1;
+  }
+  .ago-sub { font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+
+  .name {
+    font-family: var(--mono);
+    font-size: 14.5px;
+    font-weight: 600;
+    margin-top: 7px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .meta {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .meta .sep { color: var(--text-faint); margin: 0 5px; }
+  .tail {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-soft);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tail::before { content: "\2514 "; color: var(--text-faint); }
+  .tail:empty { display: none; }
+
+  .output {
+    display: none;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text-dim);
+    background: var(--surface-deep);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    margin-top: 10px;
+    padding: 10px 12px;
+    max-height: 340px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    cursor: text;
+  }
+  .card.expanded .output { display: block; }
+
+  /* ---------- empty state ---------- */
+  .empty {
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 48px 24px;
+    text-align: center;
+    color: var(--text-dim);
+    margin-top: 24px;
+  }
+  .empty p { margin-bottom: 14px; }
+  .empty code {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 14px;
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wordmark"><span class="beacon">&#9650;</span> tower</div>
+  <div class="counts" id="counts"></div>
+  <div class="right">
+    <span class="conn" id="conn"><span class="conn-dot"></span><span id="conn-label">live</span></span>
+    <span id="clock"></span>
+  </div>
+</header>
+
+<main id="board"></main>
+
+<script>
+'use strict';
+
+const state = {
+  sessions: [],          // light session records from the daemon
+  outputs: new Map(),    // id -> [lines]
+  expandedId: null,
+  pinned: true,          // expanded output scrolled to bottom?
+};
+
+const ATTENTION = new Set(['waiting', 'exited-error']);
+const RANK = { waiting: 0, 'exited-error': 1, running: 2, idle: 3, stale: 4, 'exited-unknown': 5, 'exited-ok': 6 };
+const LABELS = {
+  running: 'running', idle: 'idle', waiting: 'waiting on you', stale: 'disconnected',
+  'exited-ok': 'exited · ok', 'exited-error': 'exited', 'exited-unknown': 'exited',
+};
+
+function statusLabel(s) {
+  if (s.status === 'exited-error') return `exited · code ${s.exitCode}`;
+  return LABELS[s.status] || s.status;
+}
+
+function fmtAgo(ms) {
+  if (ms == null || !isFinite(ms) || ms < 0) return '–';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 1) return 'now';
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60);
+  if (m < 60) return m + 'm ' + String(sec % 60).padStart(2, '0') + 's';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  return Math.floor(h / 24) + 'd';
+}
+
+function agoBasis(s) {
+  return s.exited ? (s.exitedAt || s.lastOutputAt) : (s.lastOutputAt || s.startedAt);
+}
+
+function shortenCwd(cwd) {
+  return (cwd || '').replace(/\\/g, '/').replace(/^\/(?:home|Users)\/[^/]+/, '~').replace(/^[A-Za-z]:\/Users\/[^/]+/, '~');
+}
+
+function sorted(list) {
+  return list.slice().sort((a, b) => {
+    const d = (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9);
+    if (d !== 0) return d;
+    return (agoBasis(b) || 0) - (agoBasis(a) || 0);
+  });
+}
+
+// ---------- card DOM (keyed, updated in place) ----------
+
+const cards = new Map(); // id -> { el, refs }
+
+function makeCard(s) {
+  const el = document.createElement('article');
+  el.className = 'card';
+  el.tabIndex = 0;
+  el.dataset.id = s.id;
+
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  const status = document.createElement('span');
+  status.className = 'status';
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  const statusLabelEl = document.createElement('span');
+  status.append(dot, statusLabelEl);
+  const ago = document.createElement('span');
+  ago.className = 'ago';
+  const agoNum = document.createElement('span');
+  agoNum.className = 'ago-num';
+  const agoSub = document.createElement('span');
+  agoSub.className = 'ago-sub';
+  ago.append(agoNum, agoSub);
+  head.append(status, ago);
+
+  const name = document.createElement('h2');
+  name.className = 'name';
+  const meta = document.createElement('p');
+  meta.className = 'meta';
+  const cwd = document.createElement('span');
+  cwd.className = 'cwd';
+  const sep = document.createElement('span');
+  sep.className = 'sep';
+  sep.textContent = '·';
+  const cmd = document.createElement('span');
+  cmd.className = 'cmd';
+  meta.append(cwd, sep, cmd);
+
+  const tail = document.createElement('p');
+  tail.className = 'tail';
+  const output = document.createElement('pre');
+  output.className = 'output';
+
+  el.append(head, name, meta, tail, output);
+
+  el.addEventListener('click', (e) => {
+    if (output.contains(e.target)) return; // let people select text
+    toggleExpand(s.id);
+  });
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(s.id); }
+  });
+  output.addEventListener('scroll', () => {
+    if (state.expandedId === el.dataset.id) {
+      state.pinned = output.scrollTop + output.clientHeight >= output.scrollHeight - 6;
+    }
+  });
+
+  return { el, refs: { statusLabelEl, agoNum, agoSub, name, cwd, cmd, tail, output } };
+}
+
+function updateCard(entry, s, now) {
+  const { el, refs } = entry;
+  el.dataset.status = s.status;
+  refs.statusLabelEl.textContent = statusLabel(s);
+  refs.agoNum.textContent = fmtAgo(now - agoBasis(s));
+  refs.agoSub.textContent = s.exited ? 'since exit' : 'since output';
+  refs.name.textContent = s.name;
+  refs.cwd.textContent = shortenCwd(s.cwd);
+  refs.cmd.textContent = s.command;
+  refs.tail.textContent = el.classList.contains('expanded') ? '' : (s.tail || '');
+}
+
+function setOutput(entry, lines) {
+  const out = entry.refs.output;
+  const stick = state.pinned;
+  out.textContent = (lines || []).join('\n');
+  if (stick) out.scrollTop = out.scrollHeight;
+}
+
+async function toggleExpand(id) {
+  if (state.expandedId === id) {
+    state.expandedId = null;
+    render();
+    return;
+  }
+  state.expandedId = id;
+  state.pinned = true;
+  render();
+  try {
+    const r = await fetch('/api/session/' + id);
+    if (r.ok) {
+      const data = await r.json();
+      state.outputs.set(id, data.lines || []);
+      const entry = cards.get(id);
+      if (entry && state.expandedId === id) setOutput(entry, data.lines);
+    }
+  } catch { /* the SSE stream will fill it in */ }
+}
+
+// ---------- board rendering ----------
+
+const board = document.getElementById('board');
+let bandAttention = null;
+let bandQuiet = null;
+
+function buildBands() {
+  board.textContent = '';
+  bandAttention = { label: document.createElement('div'), grid: document.createElement('div') };
+  bandAttention.label.className = 'band-label attention';
+  bandAttention.grid.className = 'grid';
+  bandQuiet = { label: document.createElement('div'), grid: document.createElement('div') };
+  bandQuiet.label.className = 'band-label';
+  bandQuiet.grid.className = 'grid';
+  board.append(bandAttention.label, bandAttention.grid, bandQuiet.label, bandQuiet.grid);
+}
+buildBands();
+
+function bandLabel(el, text, n, attention) {
+  el.textContent = '';
+  const t = document.createElement('span');
+  t.textContent = text;
+  const count = document.createElement('span');
+  count.className = 'n';
+  count.textContent = '(' + n + ')';
+  el.append(t, count);
+  el.style.display = n ? '' : 'none';
+}
+
+function render() {
+  const now = Date.now();
+  const list = sorted(state.sessions);
+
+  if (list.length === 0) {
+    board.textContent = '';
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    const p = document.createElement('p');
+    p.textContent = 'No sessions yet. Wrap any command and it appears here:';
+    const code = document.createElement('code');
+    code.textContent = 'tower run npm run dev';
+    empty.append(p, code);
+    board.append(empty);
+    bandAttention = null;
+    return;
+  }
+  if (!bandAttention) buildBands();
+
+  const need = list.filter((s) => ATTENTION.has(s.status));
+  const quiet = list.filter((s) => !ATTENTION.has(s.status));
+  bandLabel(bandAttention.label, 'needs you', need.length, true);
+  bandLabel(bandQuiet.label, need.length ? 'all quiet' : 'all quiet — nothing needs you', quiet.length, false);
+
+  const seen = new Set();
+  const place = (bucket, grid) => {
+    let cursor = null;
+    for (const s of bucket) {
+      seen.add(s.id);
+      let entry = cards.get(s.id);
+      if (!entry) { entry = makeCard(s); cards.set(s.id, entry); }
+      updateCard(entry, s, now);
+      const expanded = state.expandedId === s.id;
+      entry.el.classList.toggle('expanded', expanded);
+      if (expanded) entry.refs.tail.textContent = '';
+      const next = cursor ? cursor.nextSibling : grid.firstChild;
+      if (entry.el !== next) {
+        const scroll = expanded ? entry.refs.output.scrollTop : null;
+        grid.insertBefore(entry.el, next);
+        if (scroll != null) entry.refs.output.scrollTop = state.pinned ? entry.refs.output.scrollHeight : scroll;
+      }
+      cursor = entry.el;
+    }
+    while (cursor ? cursor.nextSibling : grid.firstChild) {
+      (cursor ? cursor.nextSibling : grid.firstChild).remove();
+    }
+  };
+  place(need, bandAttention.grid);
+  place(quiet, bandQuiet.grid);
+
+  for (const [id, entry] of cards) {
+    if (!seen.has(id)) { entry.el.remove(); cards.delete(id); }
+  }
+
+  // header counts
+  const counts = { need: need.length, running: 0, idle: 0, exited: 0 };
+  for (const s of state.sessions) {
+    if (s.status === 'running') counts.running++;
+    else if (s.status === 'idle') counts.idle++;
+    else if (s.exited || s.status === 'stale') counts.exited++;
+  }
+  const countsEl = document.getElementById('counts');
+  countsEl.textContent = '';
+  const seg = (label, n, cls) => {
+    const span = document.createElement('span');
+    span.className = cls + (n === 0 ? ' zero' : '');
+    const b = document.createElement('b');
+    b.textContent = n;
+    span.append(b, document.createTextNode(' ' + label));
+    return span;
+  };
+  countsEl.append(
+    seg('need you', counts.need, 'need'),
+    seg('running', counts.running, ''),
+    seg('idle', counts.idle, ''),
+    seg('exited', counts.exited, ''),
+  );
+  document.title = counts.need ? `(${counts.need}) tower` : 'tower';
+}
+
+// ---------- live data ----------
+
+function applySessions(sessions) {
+  state.sessions = sessions;
+  render();
+}
+
+const conn = document.getElementById('conn');
+const connLabel = document.getElementById('conn-label');
+
+const es = new EventSource('/api/events');
+es.onopen = () => { conn.classList.remove('down'); connLabel.textContent = 'live'; };
+es.onerror = () => { conn.classList.add('down'); connLabel.textContent = 'reconnecting'; };
+es.onmessage = (e) => {
+  let msg = null;
+  try { msg = JSON.parse(e.data); } catch { return; }
+  if (msg.type === 'sessions') applySessions(msg.sessions || []);
+  else if (msg.type === 'output') {
+    state.outputs.set(msg.id, msg.lines || []);
+    if (state.expandedId === msg.id) {
+      const entry = cards.get(msg.id);
+      if (entry) setOutput(entry, msg.lines);
+    }
+  }
+};
+
+fetch('/api/state').then((r) => r.json()).then((d) => applySessions(d.sessions || [])).catch(() => {});
+
+// local ticks keep the ago-clocks honest between server pushes
+setInterval(() => { if (state.sessions.length) render(); }, 1000);
+function tickClock() {
+  const d = new Date();
+  document.getElementById('clock').textContent =
+    [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
+}
+tickClock();
+setInterval(tickClock, 1000);
+</script>
+</body>
+</html>
