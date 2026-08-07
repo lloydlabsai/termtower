@@ -125,7 +125,7 @@ Built for parallel agents: see **[docs/AGENTS.md](docs/AGENTS.md)** for the copy
 
 ## How it works
 
-Three small pieces, about 2,900 lines total:
+Three small pieces, about 3,900 lines total:
 
 - **`towerd`**, a daemon that starts itself the first time you use tower. It keeps the session registry in memory, listens on a Unix domain socket, and serves the board on `http://127.0.0.1:8697`. The transcript watcher and the summarizer loop live inside it. Last-known state (summaries included) is persisted to `~/.tower/state.json`, so a daemon restart is not amnesia.
 - **the wrapper** (`tower run`) spawns your command in a PTY, passes your terminal through untouched, and streams the last ~200 lines of output to the daemon. If the daemon dies, your process does not; the wrapper reconnects quietly in the background.

@@ -1,14 +1,16 @@
 # IDEAS
 
-Parking lot for scope creep. Nothing here is v1 or v1.5.
+Parking lot for scope creep. Nothing here is shipped.
 
-Explicit non-goals of v1.5, recorded so they stay said no to (for now):
+Standing non-goals, recorded so they stay said no to:
 
-- Inter-session messaging / sending input into sessions — the board stays read-only
+- Sending input into any session's terminal - permanent. v2 shipped inter-session
+  *messaging* (the inbox), but delivery ends at the mailbox and the board stays read-only.
 - Model providers besides Anthropic (config key naming is provider-generic; the logic is not)
 - Cloud chat visibility (claude.ai and friends)
-- Summary history / timeline views — only the current summary per session
 - Auth, accounts, telemetry, remote access
+- Summary history beyond the bounded per-session ring that shipped in v2 - no
+  pagination, no export, no archive; state.json is not a database
 
 Maybe someday:
 

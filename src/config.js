@@ -130,19 +130,25 @@ function looksLikeAnthropicKey(value) {
   return /^sk-[\w-]{20,}$/.test(String(value || ''));
 }
 
-// Stat-based cache so the daemon can consult config every second for free.
-// Size is part of the signature: Windows mtime granularity can swallow two
-// writes in the same tick.
+// Content-signature cache so the daemon can consult config every second for
+// free. The signature hashes the file BYTES, not mtime+size: filesystem
+// timestamp granularity (a few ms on ext4) can swallow a same-size rewrite,
+// and the file is tiny - reading it is cheaper than being wrong.
 let cached = null;
 let cachedSig = '';
 function effectiveCached(file = proto.configPath()) {
   let sig = 'absent';
+  let raw = null;
   try {
-    const st = fs.statSync(file);
-    sig = `${st.mtimeMs}:${st.size}`;
+    raw = fs.readFileSync(file, 'utf8');
+    let h = 5381;
+    for (let i = 0; i < raw.length; i++) h = ((h * 33) ^ raw.charCodeAt(i)) >>> 0;
+    sig = `${raw.length}:${h}`;
   } catch { /* missing file is a valid state */ }
   if (!cached || sig !== cachedSig) {
-    cached = effective(load(file));
+    let parsed = {};
+    if (raw !== null) { try { parsed = JSON.parse(raw) || {}; } catch { parsed = {}; } }
+    cached = effective(parsed);
     cachedSig = sig;
   }
   return cached;
