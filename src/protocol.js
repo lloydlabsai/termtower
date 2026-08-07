@@ -48,6 +48,7 @@ function socketPath() {
 function daemonInfoPath() { return path.join(TOWER_DIR, 'daemon.json'); }
 function statePath() { return path.join(TOWER_DIR, 'state.json'); }
 function daemonLogPath() { return path.join(TOWER_DIR, 'daemon.log'); }
+function configPath() { return path.join(TOWER_DIR, 'config.json'); }
 
 function send(sock, msg) {
   if (!sock || sock.destroyed || !sock.writable) return;
@@ -118,6 +119,7 @@ module.exports = {
   daemonInfoPath,
   statePath,
   daemonLogPath,
+  configPath,
   send,
   onMessages,
   looksLikePrompt,

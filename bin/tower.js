@@ -34,6 +34,9 @@ usage:
   tower ls                                        list sessions in the terminal
   tower open                                      open the status board in a browser
   tower kill <name>                               stop a session (or "daemon" to stop towerd)
+  tower config get [key]                          show configuration (secrets masked)
+  tower config set <key> <value>                  set a value (e.g. anthropic_key sk-...)
+  tower config unset <key>                        remove a value
 `);
   process.exit(process.argv.length <= 2 ? 0 : 1);
 }
@@ -237,6 +240,107 @@ async function cmdKill(name) {
   else console.error(`tower: ${reply.message}`);
 }
 
+// ---------- config ----------
+
+const SECRET_KEY_RE = /key|token|secret/i;
+
+async function cmdConfig(args) {
+  const config = require('../src/config');
+  const sub = args[0];
+
+  if (sub === 'get' && args.length <= 2) {
+    const stored = config.load();
+    const eff = config.effective(stored);
+    const rows = Object.keys(config.KNOWN_KEYS).map((key) => {
+      let value = config.getPath(eff, key);
+      let source = config.getPath(stored, key) !== undefined ? 'config' : 'default';
+      if (key === 'anthropic_key') {
+        value = config.maskSecret(config.apiKey(eff));
+        source = config.keySource(eff) || 'not set';
+      }
+      return { key, value: String(value ?? '(not set)'), source };
+    });
+    if (args[1]) {
+      const row = rows.find((r) => r.key === args[1]);
+      if (!row) return unknownKey(args[1], config);
+      console.log(row.value);
+      return;
+    }
+    const w = Math.max(...rows.map((r) => r.key.length));
+    for (const r of rows) console.log(`${r.key.padEnd(w)}  ${r.value}  ${paint(`(${r.source})`, DIM)}`);
+    return;
+  }
+
+  if (sub === 'set' && args[1] && args.length >= 3) {
+    const key = args[1];
+    const wanted = config.KNOWN_KEYS[key];
+    if (!wanted) return unknownKey(key, config);
+    const raw = args.slice(2).join(' ');
+    let value = raw;
+    if (wanted !== 'string') {
+      try { value = JSON.parse(raw); } catch { /* stays a string, caught below */ }
+      if (typeof value !== wanted) {
+        console.error(`tower: ${key} expects a ${wanted}, got "${raw}"`);
+        process.exit(1);
+      }
+    }
+    if (key === 'summaries.interval_seconds' && value < 30) {
+      console.error('tower: summaries.interval_seconds must be at least 30');
+      process.exit(1);
+    }
+    if (key === 'anthropic_key' && !config.looksLikeAnthropicKey(value)) {
+      console.error('tower: that does not look like an Anthropic API key (expected sk-...)');
+      process.exit(1);
+    }
+    const stored = config.load();
+    config.setPath(stored, key, value);
+    config.save(stored);
+    if (SECRET_KEY_RE.test(key)) {
+      console.log(`${key} = ${config.maskSecret(value)} (saved)`);
+    } else {
+      console.log(`${key} = ${value} (saved)`);
+    }
+    if (key === 'anthropic_key') {
+      const anthropic = require('../src/anthropic');
+      const model = config.effective(stored).summaries.model;
+      process.stdout.write(`verifying with a 1-token call to ${model}... `);
+      const v = await anthropic.verifyKey(value, model);
+      if (v.ok) {
+        console.log('ok - summaries are enabled');
+      } else if (v.invalidKey) {
+        console.log(`rejected (${v.message})`);
+        console.error('tower: the key is saved but the API rejected it; summaries will stay off until it is fixed');
+        // process.exit() here trips a libuv teardown assertion on Windows
+        // while undici's fetch handles are still closing; exitCode drains clean.
+        process.exitCode = 1;
+      } else {
+        console.log(`could not verify (${v.message})`);
+        console.log('the key is saved; tower will try it when the network is back');
+      }
+    }
+    return;
+  }
+
+  if (sub === 'unset' && args[1] && args.length === 2) {
+    if (!config.KNOWN_KEYS[args[1]]) return unknownKey(args[1], config);
+    const stored = config.load();
+    if (config.unsetPath(stored, args[1])) {
+      config.save(stored);
+      console.log(`${args[1]} removed`);
+    } else {
+      console.log(`${args[1]} was not set`);
+    }
+    return;
+  }
+
+  usage();
+}
+
+function unknownKey(key, config) {
+  console.error(`tower: unknown config key "${key}"\nknown keys: ${Object.keys(config.KNOWN_KEYS).join(', ')}`);
+  process.exit(1);
+}
+
 async function main() {
   const cmd = process.argv[2];
   const args = process.argv.slice(3);
@@ -245,6 +349,7 @@ async function main() {
     case 'ls': case 'list': return cmdLs();
     case 'open': return cmdOpen();
     case 'kill': return cmdKill(args[0]);
+    case 'config': return cmdConfig(args);
     case '--version': case '-v':
       return console.log(require('../package.json').version);
     default:
