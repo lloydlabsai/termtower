@@ -24,6 +24,10 @@ const fs = require('fs');
 const TOWER_DIR = path.join(os.homedir(), '.tower');
 const DEFAULT_PORT = 8697; // "T-O-W-R" on a phone keypad
 
+const IDLE_AFTER_MS = 15000;      // alive but quiet this long -> idle
+const WAIT_SETTLE_MS = 2000;      // prompt-looking last line unchanged this long -> waiting
+const EXITED_TTL_MS = 30 * 60000; // exited sessions drop off the board after this
+
 function ensureTowerDir() {
   fs.mkdirSync(TOWER_DIR, { recursive: true });
   return TOWER_DIR;
@@ -63,9 +67,45 @@ function onMessages(sock, handler) {
   });
 }
 
+// ---------- status heuristics ----------
+// Deliberately dumb. A session is "waiting" when its last line of output looks
+// like a question and nothing has been printed since. Tune by adding patterns.
+const PROMPT_PATTERNS = [
+  /[?>»❯]\s*$/,                        // "Continue?", "> ", "❯ "
+  /:\s$/,                              // "Username: " (trailing space is the signal)
+  /\[[yY](?:\/[nN])?\]\s*\??\s*$/,     // "[y/n]", "[Y]"
+  /\((?:y\/n|yes\/no)\)\s*\??\s*$/i,   // "(y/N)?"
+  /(?:password|passphrase|username|login|token|otp|2fa code)[^:]*:?\s*$/i,
+  /press (?:any key|enter|return)/i,
+  /\$\s$/,                             // a shell prompt inside the session
+];
+
+function looksLikePrompt(line) {
+  if (!line) return false;
+  return PROMPT_PATTERNS.some((re) => re.test(line));
+}
+
+// Pure derivation so the daemon is the single clock.
+// `sess` needs: exited, exitCode, stale, startedAt, lastOutputAt, tailLine.
+function deriveStatus(sess, now = Date.now()) {
+  if (sess.exited) {
+    if (sess.exitCode === 0) return 'exited-ok';
+    if (sess.exitCode === null || sess.exitCode === undefined) return 'exited-unknown';
+    return 'exited-error';
+  }
+  if (sess.stale) return 'stale';
+  const quiet = now - (sess.lastOutputAt || sess.startedAt || now);
+  if (quiet >= WAIT_SETTLE_MS && looksLikePrompt(sess.tailLine)) return 'waiting';
+  if (quiet >= IDLE_AFTER_MS) return 'idle';
+  return 'running';
+}
+
 module.exports = {
   TOWER_DIR,
   DEFAULT_PORT,
+  IDLE_AFTER_MS,
+  WAIT_SETTLE_MS,
+  EXITED_TTL_MS,
   ensureTowerDir,
   socketPath,
   daemonInfoPath,
@@ -73,4 +113,6 @@ module.exports = {
   daemonLogPath,
   send,
   onMessages,
+  looksLikePrompt,
+  deriveStatus,
 };

@@ -17,17 +17,63 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-function deriveStatus(sess) {
-  if (sess.exited) {
-    if (sess.exitCode === 0) return 'exited-ok';
-    if (sess.exitCode === null || sess.exitCode === undefined) return 'exited-unknown';
-    return 'exited-error';
-  }
-  if (sess.stale) return 'stale';
-  return 'running';
+// ---------- output ring buffer ----------
+// Stores the last ~200 plain-text lines per session. ANSI escapes are stripped
+// (the board renders text, the user's own terminal already showed the colors)
+// and carriage-return overwrites are collapsed so progress bars keep only
+// their latest state.
+
+const ANSI_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b[@-Z\\-_]/g;
+const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g; // keeps \t \n \r
+
+function sanitize(text) {
+  return String(text).replace(ANSI_RE, '').replace(CTRL_RE, '');
 }
 
-function lightSession(sess) {
+function collapseCR(seg) {
+  if (!seg.includes('\r')) return seg;
+  const parts = seg.split('\r');
+  let line = parts.pop();
+  while (line === '' && parts.length) line = parts.pop();
+  return line;
+}
+
+class RingBuffer {
+  constructor(maxLines = 200) {
+    this.maxLines = maxLines;
+    this.lines = [];
+    this.partial = ''; // the unterminated last line; this is where prompts live
+  }
+  push(chunk) {
+    const data = this.partial + sanitize(chunk).replace(/\r\n/g, '\n');
+    const segs = data.split('\n');
+    this.partial = segs.pop();
+    for (const seg of segs) this.lines.push(collapseCR(seg));
+    if (this.partial.length > 4000) this.partial = collapseCR(this.partial).slice(-4000);
+    if (this.lines.length > this.maxLines) this.lines.splice(0, this.lines.length - this.maxLines);
+  }
+  tailLine() {
+    const p = collapseCR(this.partial);
+    if (p.trim() !== '') return p;
+    for (let i = this.lines.length - 1; i >= 0; i--) {
+      if (this.lines[i].trim() !== '') return this.lines[i];
+    }
+    return '';
+  }
+  toLines() {
+    const out = this.lines.slice();
+    const p = collapseCR(this.partial);
+    if (p !== '') out.push(p);
+    return out.slice(-this.maxLines);
+  }
+  loadLines(lines) {
+    this.lines = (Array.isArray(lines) ? lines : []).map(String).slice(-this.maxLines);
+    this.partial = '';
+  }
+}
+
+function lightSession(sess, now = Date.now()) {
+  const tailLine = sess.buffer.tailLine();
   return {
     id: sess.id,
     name: sess.name,
@@ -43,7 +89,8 @@ function lightSession(sess) {
     exitedAt: sess.exitedAt,
     stale: sess.stale,
     pty: sess.pty,
-    status: deriveStatus(sess),
+    status: proto.deriveStatus({ ...sess, tailLine }, now),
+    tail: tailLine.slice(-160),
   };
 }
 
@@ -88,6 +135,7 @@ function handleRegister(sock, raw) {
       exitedAt: null,
       stale: false,
       pty: !!s.pty,
+      buffer: new RingBuffer(),
       sock,
     };
     sessions.set(sess.id, sess);
@@ -144,6 +192,10 @@ function notifyChange() {
   // Extended by later build steps (state persistence, SSE broadcast).
 }
 
+function outputChanged(_id) {
+  // Extended by the status board step (per-session SSE output events).
+}
+
 // ---------- socket server ----------
 
 const server = net.createServer((sock) => {
@@ -157,7 +209,9 @@ const server = net.createServer((sock) => {
       case 'output': {
         const sess = sessions.get(msg.id);
         if (sess && typeof msg.chunk === 'string') {
+          sess.buffer.push(msg.chunk);
           sess.lastOutputAt = Date.now();
+          outputChanged(sess.id);
           notifyChange();
         }
         break;
@@ -232,4 +286,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { start, sessions, deriveStatus };
+module.exports = { start, sessions, RingBuffer };
