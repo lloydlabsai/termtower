@@ -73,6 +73,19 @@
     font-size: 11.5px;
     color: var(--text-dim);
   }
+  #search {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 9px;
+    width: 210px;
+    outline: none;
+  }
+  #search::placeholder { color: var(--text-faint); }
+  #search:focus { border-color: #2E3C57; }
   .conn { display: inline-flex; align-items: center; gap: 6px; }
   .conn-dot {
     width: 7px; height: 7px; border-radius: 50%;
@@ -293,6 +306,30 @@
   .tail::before { content: "\2514 "; color: var(--text-faint); }
   .tail:empty { display: none; }
 
+  /* ---------- search hits ---------- */
+  .hits {
+    display: none;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-soft);
+  }
+  .card.searching .hits { display: block; }
+  .card.searching .tail { display: none; }
+  .hit {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  mark {
+    background: color-mix(in srgb, var(--waiting) 32%, transparent);
+    color: var(--text);
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
   .output {
     display: none;
     font-family: var(--mono);
@@ -338,6 +375,7 @@
   <div class="wordmark"><span class="beacon">&#9650;</span> tower</div>
   <div class="counts" id="counts"></div>
   <div class="right">
+    <input id="search" type="search" placeholder="search sessions  /" spellcheck="false" autocomplete="off">
     <span class="conn" id="conn"><span class="conn-dot"></span><span id="conn-label">live</span></span>
     <span id="clock"></span>
   </div>
@@ -356,6 +394,8 @@ const state = {
   expandedId: null,
   expandedStamp: 0,      // lastOutputAt when the expanded card was last fetched
   pinned: true,          // expanded output scrolled to bottom?
+  searchQ: '',           // active search text ('' = not searching)
+  searchResults: null,   // Map id -> match record from /api/search
 };
 
 const ATTENTION = new Set(['waiting', 'exited-error']);
@@ -494,10 +534,12 @@ function makeCard(s) {
 
   const tail = document.createElement('p');
   tail.className = 'tail';
+  const hits = document.createElement('div');
+  hits.className = 'hits';
   const output = document.createElement('pre');
   output.className = 'output';
 
-  el.append(head, statusRow, meta, story, tail, output);
+  el.append(head, statusRow, meta, story, tail, hits, output);
 
   el.addEventListener('click', (e) => {
     if (output.contains(e.target)) return; // let people select text
@@ -512,7 +554,31 @@ function makeCard(s) {
     }
   });
 
-  return { el, refs: { statusLabelEl, agoNum, agoSub, nameText, badge, cwd, cmd, branchSep, branch, doing, last, next, storyAge, tail, output } };
+  return { el, refs: { statusLabelEl, agoNum, agoSub, nameText, badge, cwd, cmd, branchSep, branch, doing, last, next, storyAge, tail, hits, output } };
+}
+
+// XSS-safe highlighter: text nodes with <mark> around case-insensitive hits.
+// Windows are compared in the original string - toLowerCase can change string
+// length (İ -> i + combining dot), which would desync indexOf offsets.
+function highlightInto(el, text, q) {
+  el.textContent = '';
+  const needle = q.toLowerCase();
+  const n = q.length;
+  let i = 0;
+  let from = 0;
+  while (i <= text.length - n) {
+    if (text.slice(i, i + n).toLowerCase() === needle) {
+      el.append(text.slice(from, i));
+      const m = document.createElement('mark');
+      m.textContent = text.slice(i, i + n);
+      el.append(m);
+      i += n;
+      from = i;
+    } else {
+      i++;
+    }
+  }
+  el.append(text.slice(from));
 }
 
 function updateCard(entry, s, now) {
@@ -542,6 +608,18 @@ function updateCard(entry, s, now) {
     refs.storyAge.textContent = 'as of ' + fmtAgoCoarse(now - (sum.summarizedAt || now));
   }
   refs.tail.textContent = el.classList.contains('expanded') ? '' : (s.tail || '');
+  const match = s._match;
+  const showHits = !!(match && match.matchLines && match.matchLines.length);
+  el.classList.toggle('searching', showHits);
+  refs.hits.textContent = '';
+  if (showHits) {
+    for (const line of match.matchLines.slice(0, 3)) {
+      const div = document.createElement('div');
+      div.className = 'hit';
+      highlightInto(div, line.trim(), state.searchQ);
+      refs.hits.append(div);
+    }
+  }
 }
 
 function setOutput(entry, lines) {
@@ -605,19 +683,35 @@ function bandLabel(el, text, n, attention) {
   el.style.display = n ? '' : 'none';
 }
 
+// During a search only matching cards render, carrying their match record.
+function visibleSessions() {
+  if (!state.searchQ || !state.searchResults) return state.sessions;
+  const out = [];
+  for (const s of state.sessions) {
+    const m = state.searchResults.get(s.id);
+    if (m) out.push(Object.assign({}, s, { _match: m }));
+  }
+  return out;
+}
+
 function render() {
   const now = Date.now();
-  const list = sorted(state.sessions);
+  const list = sorted(visibleSessions());
 
   if (list.length === 0) {
     board.textContent = '';
     const empty = document.createElement('div');
     empty.className = 'empty';
     const p = document.createElement('p');
-    p.textContent = 'No sessions yet. Wrap any command and it appears here:';
-    const code = document.createElement('code');
-    code.textContent = 'tower run npm run dev';
-    empty.append(p, code);
+    if (state.searchQ && state.sessions.length) {
+      p.textContent = `no sessions match "${state.searchQ}"`;
+      empty.append(p);
+    } else {
+      p.textContent = 'No sessions yet. Wrap any command and it appears here:';
+      const code = document.createElement('code');
+      code.textContent = 'tower run npm run dev';
+      empty.append(p, code);
+    }
     board.append(empty);
     bandAttention = null;
     return;
@@ -663,7 +757,12 @@ function render() {
   }
 
   for (const [id, entry] of cards) {
-    if (!seen.has(id)) { entry.el.remove(); cards.delete(id); }
+    if (!seen.has(id)) {
+      entry.el.remove();
+      // the expanded card keeps its entry (and its populated output pane) so
+      // clearing a search that filtered it out restores it intact
+      if (id !== state.expandedId) cards.delete(id);
+    }
   }
 
   // header counts (active claude sessions count as running)
@@ -691,6 +790,55 @@ function render() {
   );
   document.title = counts.need ? `(${counts.need}) tower` : 'tower';
 }
+
+// ---------- search ----------
+
+const searchInput = document.getElementById('search');
+let searchSeq = 0;
+let searchDebounce = null;
+let lastAutoSearch = 0;
+
+async function doSearch(q) {
+  const seq = ++searchSeq;
+  try {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+    if (!r.ok) return;
+    const d = await r.json();
+    if (seq !== searchSeq || state.searchQ !== q) return; // a newer query won
+    state.searchResults = new Map((d.results || []).map((x) => [x.id, x]));
+    render();
+  } catch { /* daemon hiccup; keep the current view */ }
+}
+
+function runSearch() {
+  const q = searchInput.value.trim();
+  state.searchQ = q;
+  if (!q) {
+    state.searchResults = null;
+    render();
+    return;
+  }
+  doSearch(q);
+}
+
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(runSearch, 150);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === '/' && document.activeElement !== searchInput && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    searchInput.focus();
+    searchInput.select();
+  } else if (e.key === 'Escape' && (state.searchQ || document.activeElement === searchInput)) {
+    searchInput.value = '';
+    state.searchQ = '';
+    state.searchResults = null;
+    searchInput.blur();
+    render();
+  }
+});
 
 // ---------- notice bar: key trouble, or a one-time dismissible hint ----------
 
@@ -741,6 +889,14 @@ function applySessions(sessions, summaries) {
   if (summaries) state.summaries = summaries;
   renderNotice();
   render();
+  // fresh output may contain fresh matches; keep an active search current,
+  // but at most 1/s - a streaming session drives sessions frames every 100ms,
+  // and this must never race the typing debounce (state.searchQ, not the
+  // live input value)
+  if (state.searchQ && Date.now() - lastAutoSearch > 1000) {
+    lastAutoSearch = Date.now();
+    doSearch(state.searchQ);
+  }
   // an expanded transcript card has no output stream; refetch when it moves
   if (state.expandedId && state.expandedId.startsWith('cc-')) {
     const s = sessions.find((x) => x.id === state.expandedId);

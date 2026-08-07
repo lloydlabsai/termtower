@@ -14,6 +14,7 @@
 // CLI -> daemon (one-shot request/response):
 //   { type: 'ping' }               -> { type: 'pong', pid, port }
 //   { type: 'list' }               -> { type: 'sessions', sessions: [...] }
+//   { type: 'search', q }          -> { type: 'results', results: [...] }
 //   { type: 'kill-session', name } -> { type: 'ok', name } | { type: 'error', message }
 //   { type: 'shutdown' }           -> { type: 'ok' }
 
@@ -54,6 +55,16 @@ function daemonInfoPath() { return path.join(TOWER_DIR, 'daemon.json'); }
 function statePath() { return path.join(TOWER_DIR, 'state.json'); }
 function daemonLogPath() { return path.join(TOWER_DIR, 'daemon.log'); }
 function configPath() { return path.join(TOWER_DIR, 'config.json'); }
+
+// Strip ANSI escapes and control bytes (keeps \t \n \r). One implementation
+// for every text that reaches a terminal or the board: ring-buffer output,
+// transcript turns, titles.
+const ANSI_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b[@-Z\\-_]/g;
+const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+
+function sanitizeText(text) {
+  return String(text).replace(ANSI_RE, '').replace(CTRL_RE, '');
+}
 
 function send(sock, msg) {
   if (!sock || sock.destroyed || !sock.writable) return;
@@ -127,6 +138,7 @@ module.exports = {
   configPath,
   send,
   onMessages,
+  sanitizeText,
   looksLikePrompt,
   deriveStatus,
 };

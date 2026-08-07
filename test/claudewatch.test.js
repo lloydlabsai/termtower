@@ -75,6 +75,18 @@ test('waiting: assistant question mark, question tools, and user-replied clears'
   assert.strictEqual(midTurn.waiting, false);
 });
 
+test('transcript text is control-stripped: escapes in turns and titles never reach a terminal', () => {
+  const hostile = 'deploy done ]52;c;ZXZpbA== and [2Jtitle ]0;fake end';
+  const p = parseTranscriptTail([
+    JSON.stringify({ type: 'ai-title', aiTitle: 'Fix ]0;spoofed login' }),
+    entry('user', hostile),
+  ].join('\n'));
+  assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(p.turns[0].text), 'escape bytes survived in turn text');
+  assert.match(p.turns[0].text, /deploy done/);
+  assert.ok(!/[\x00-\x1f\x7f]/.test(p.title), 'escape bytes survived in title');
+  assert.match(p.title, /Fix\s+login/);
+});
+
 test('parseTranscriptTail tolerates garbage lines and truncates huge turns', () => {
   const p = parseTranscriptTail([
     '{broken json',

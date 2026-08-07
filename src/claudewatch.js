@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const proto = require('./protocol');
 const config = require('./config');
 const { hashLines } = require('./summarizer');
 
@@ -62,7 +63,7 @@ function parseTranscriptTail(text) {
     try { e = JSON.parse(line); } catch { continue; }
     if (!e || typeof e !== 'object') continue;
     if (e.type === 'ai-title' && typeof e.aiTitle === 'string' && e.aiTitle.trim()) {
-      out.title = e.aiTitle.trim();
+      out.title = proto.sanitizeText(e.aiTitle).trim();
       continue;
     }
     if ((e.type !== 'user' && e.type !== 'assistant') || e.isSidechain) continue;
@@ -71,7 +72,10 @@ function parseTranscriptTail(text) {
     if (e.uuid) out.lastUuid = e.uuid;
     lastEntry = e;
     const msg = e.message || {};
-    const text_ = textOfContent(msg.content).trim();
+    // JSON.parse restores real ESC bytes from \u001b escapes in the JSONL;
+    // transcript text reaches terminals (tower search) and must arrive as
+    // clean as ring-buffer output does.
+    const text_ = proto.sanitizeText(textOfContent(msg.content)).trim();
     if (text_) {
       const role = e.type === 'user' ? 'user' : 'claude';
       // tool_result-only user entries have no text and are skipped here

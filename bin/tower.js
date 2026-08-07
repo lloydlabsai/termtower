@@ -33,6 +33,7 @@ function usage() {
 usage:
   tower run [--name <name>] <command> [args...]   wrap a command so it shows on the board
   tower ls                                        list sessions in the terminal
+  tower search <text>                             find it across every session's recent output
   tower open                                      open the status board in a browser
   tower kill <name>                               stop a session (or "daemon" to stop towerd)
   tower config get [key]                          show configuration (secrets masked)
@@ -254,6 +255,47 @@ async function cmdKill(name) {
   else console.error(`tower: ${reply.message}`);
 }
 
+// ---------- search ----------
+
+// Windows are compared in the original string - toLowerCase can change
+// string length (Turkish İ), which would desync indexOf offsets.
+function paintMatches(line, q) {
+  if (!USE_COLOR) return line;
+  const needle = q.toLowerCase();
+  const n = q.length;
+  let out = '';
+  let i = 0;
+  let from = 0;
+  while (i <= line.length - n) {
+    if (line.slice(i, i + n).toLowerCase() === needle) {
+      out += line.slice(from, i) + COLORS.waiting + line.slice(i, i + n) + RESET;
+      i += n;
+      from = i;
+    } else {
+      i++;
+    }
+  }
+  return out + line.slice(from);
+}
+
+async function cmdSearch(argv) {
+  const query = argv.join(' ').trim();
+  if (!query) usage();
+  const reply = await request({ type: 'search', q: query });
+  const results = sortSessions(reply.results || []);
+  if (results.length === 0) {
+    console.log(`no matches for "${query}"`);
+    return;
+  }
+  for (const r of results) {
+    const where = r.matchFields.length ? paint(` (${r.matchFields.join(', ')})`, DIM) : '';
+    console.log(paint(r.name, COLORS[r.status]) + '  ' + paint(shortenCwd(r.cwd), DIM) + where);
+    for (const line of r.matchLines) {
+      console.log('  ' + paintMatches(truncate(line.trim(), 160), query));
+    }
+  }
+}
+
 // ---------- config ----------
 
 const SECRET_KEY_RE = /key|token|secret/i;
@@ -413,6 +455,7 @@ async function main() {
   switch (cmd) {
     case 'run': return cmdRun(args);
     case 'ls': case 'list': return cmdLs();
+    case 'search': case 'grep': return cmdSearch(args);
     case 'open': return cmdOpen();
     case 'kill': return cmdKill(args[0]);
     case 'config': return cmdConfig(args);

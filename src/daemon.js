@@ -48,12 +48,7 @@ function pidAlive(pid) {
 // and carriage-return overwrites are collapsed so progress bars keep only
 // their latest state.
 
-const ANSI_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b[@-Z\\-_]/g;
-const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g; // keeps \t \n \r
-
-function sanitize(text) {
-  return String(text).replace(ANSI_RE, '').replace(CTRL_RE, '');
-}
+const sanitize = proto.sanitizeText;
 
 function collapseCR(seg) {
   if (!seg.includes('\r')) return seg;
@@ -314,6 +309,77 @@ function killSession(name) {
   return { type: 'ok', name: target.name };
 }
 
+// ---------- search ----------
+// Case-insensitive substring across everything a session knows about itself:
+// name, cwd, command, the narrative, and its recent output (conversation
+// turns for transcript sessions). Deliberately not regex: dumb and instant.
+
+const SEARCH_MAX_LINES_PER_SESSION = 5;
+const SEARCH_MAX_SESSIONS = 50;
+const SEARCH_LINE_CAP = 200;
+
+// Pure: one light session + its searchable lines -> match record or null.
+function matchSession(light, lines, query) {
+  const q = String(query).toLowerCase();
+  const fields = [];
+  const fieldPairs = [
+    ['name', light.name], ['cwd', light.cwd], ['command', light.command],
+    ['doing', light.summary && light.summary.doing],
+    ['last', light.summary && light.summary.last],
+    ['next', light.summary && light.summary.next],
+  ];
+  for (const [field, value] of fieldPairs) {
+    if (value && String(value).toLowerCase().includes(q)) fields.push(field);
+  }
+  const matchLines = [];
+  for (const raw of lines) {
+    const line = String(raw);
+    const idx = line.toLowerCase().indexOf(q);
+    if (idx !== -1) {
+      // window long lines around the hit - a snippet that no longer contains
+      // the query reads as a false positive
+      let snippet = line;
+      if (line.length > SEARCH_LINE_CAP) {
+        const start = Math.max(0, Math.min(idx - 40, line.length - SEARCH_LINE_CAP));
+        snippet = (start > 0 ? '…' : '') + line.slice(start, start + SEARCH_LINE_CAP);
+      }
+      matchLines.push(snippet);
+      if (matchLines.length >= SEARCH_MAX_LINES_PER_SESSION) break;
+    }
+  }
+  if (!fields.length && !matchLines.length) return null;
+  return { ...light, matchFields: fields, matchLines };
+}
+
+function searchableLines(light, claims) {
+  if (light.kind === 'claude') {
+    const rec = claudeWatch.get(light.id);
+    const lines = [];
+    for (const t of (rec && rec.turns) || []) {
+      for (const l of t.text.split('\n')) lines.push(`${t.role}: ${l}`);
+    }
+    // a merged card also answers for its hidden wrapper's terminal output
+    const wrapper = claims.get(light.id);
+    if (wrapper) lines.push(...wrapper.buffer.toLines());
+    return lines;
+  }
+  const sess = sessions.get(light.id);
+  return sess ? sess.buffer.toLines() : [];
+}
+
+function searchSessions(query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return [];
+  const claims = claudeClaims();
+  const out = [];
+  for (const light of lightList()) {
+    const hit = matchSession(light, searchableLines(light, claims), q);
+    if (hit) out.push(hit);
+    if (out.length >= SEARCH_MAX_SESSIONS) break;
+  }
+  return out;
+}
+
 // ---------- status board: localhost HTTP + server-sent events ----------
 
 let httpPort = null;
@@ -341,6 +407,7 @@ const httpServer = http.createServer((req, res) => {
     });
   }
   if (u.pathname === '/api/state') return json(res, 200, { sessions: lightList(), summaries: summarizer.meta() });
+  if (u.pathname === '/api/search') return json(res, 200, { results: searchSessions(u.searchParams.get('q')) });
   if (u.pathname === '/api/events') return serveEvents(req, res);
   const m = u.pathname.match(/^\/api\/session\/([\w-]+)$/);
   if (m) {
@@ -551,6 +618,9 @@ const server = net.createServer((sock) => {
       case 'kill-session':
         proto.send(sock, killSession(String(msg.name || '')));
         break;
+      case 'search':
+        proto.send(sock, { type: 'results', results: searchSessions(String(msg.q || '')) });
+        break;
       case 'shutdown':
         proto.send(sock, { type: 'ok' });
         log('shutdown requested');
@@ -687,4 +757,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { start, sessions, RingBuffer, isClaudeCommand };
+module.exports = { start, sessions, RingBuffer, isClaudeCommand, matchSession };

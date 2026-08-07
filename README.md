@@ -90,6 +90,7 @@ With a key configured, the only network traffic is to the Anthropic Messages API
 ```
 tower run [--name <name>] <command> [args...]   wrap a command so it shows on the board
 tower ls                                        list sessions in the terminal
+tower search <text>                             find it across every session's recent output
 tower open                                      open the status board in a browser
 tower kill <name>                               stop a session ("daemon" stops towerd)
 tower config get [key]                          show configuration (secrets masked)
@@ -98,6 +99,10 @@ tower config unset <key>                        remove a value
 ```
 
 That is the whole surface.
+
+## Search
+
+"Which terminal had that error?" Press `/` on the board and type; cards filter live to sessions whose name, path, command, narrative, or recent output match, with the hits highlighted. `Esc` clears. The same search is `tower search <text>` in the terminal (alias: `tower grep`). Case-insensitive substring, on purpose - it is a status board, not a log archive; only what the ring buffers and recent transcript turns still hold is searchable.
 
 ## How it works
 
