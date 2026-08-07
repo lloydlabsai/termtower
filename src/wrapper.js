@@ -6,6 +6,7 @@
 
 const net = require('net');
 const os = require('os');
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const cp = require('child_process');
@@ -47,6 +48,27 @@ function quoteWinArg(a) {
   return '"' + a.replace(/"/g, '\\"') + '"';
 }
 
+// node-pty on Windows hands the file straight to ConPTY with no PATH or
+// PATHEXT search, so "npm" or "node" must become a real file path first.
+function resolveWinExecutable(cmd) {
+  const exts = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+  const tryFile = (base) => {
+    if (path.extname(base) && fs.existsSync(base)) return base;
+    for (const ext of exts) {
+      const f = base + ext;
+      if (fs.existsSync(f)) return f;
+    }
+    return null;
+  };
+  if (cmd.includes('/') || cmd.includes('\\')) return tryFile(path.resolve(cmd));
+  for (const dir of (process.env.PATH || '').split(';')) {
+    if (!dir) continue;
+    const found = tryFile(path.join(dir, cmd));
+    if (found) return found;
+  }
+  return null;
+}
+
 function run(argv, opts = {}) {
   const session = {
     id: crypto.randomUUID(),
@@ -64,7 +86,20 @@ function run(argv, opts = {}) {
   let usingPty = false;
   if (pty) {
     try {
-      child = pty.spawn(argv[0], argv.slice(1), {
+      let file = argv[0];
+      let args = argv.slice(1);
+      if (process.platform === 'win32') {
+        const resolved = resolveWinExecutable(argv[0]);
+        if (!resolved) throw new Error(`${argv[0]} not found on PATH`);
+        if (/\.(cmd|bat)$/i.test(resolved)) {
+          // batch files need the shell; ConPTY cannot exec them directly
+          file = process.env.ComSpec || 'cmd.exe';
+          args = ['/c', resolved, ...argv.slice(1)];
+        } else {
+          file = resolved;
+        }
+      }
+      child = pty.spawn(file, args, {
         name: 'xterm-256color',
         cols: process.stdout.columns || 80,
         rows: process.stdout.rows || 24,
