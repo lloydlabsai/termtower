@@ -8,14 +8,11 @@ You run a dev server in one terminal, a test watcher in another, an AI coding ag
 
 ## Install
 
-Not on npm yet (the name is still being chosen). Install from source:
-
 ```
-git clone https://github.com/lloydlabsai/tower && cd tower
-npm i -g .
+npm i -g termtower
 ```
 
-Zero config, localhost-only. Without an API key, nothing ever leaves your machine.
+The command it installs is `tower`. Zero config, localhost-only. Without an API key, nothing ever leaves your machine.
 
 ## 60-second demo
 
@@ -122,7 +119,7 @@ macOS and Linux. Windows is out of scope for v1, though most of it happens to wo
 
 ```
 tower kill daemon
-npm rm -g tower-cli    # the package name from `npm ls -g`
+npm rm -g termtower
 rm -rf ~/.tower
 ```
 
@@ -138,7 +135,7 @@ Boring, conventional choices made during the build, recorded so they are arguabl
 - **`daemon` is a reserved session name** so `tower kill daemon` is unambiguous.
 - **Exited cards expire after 30 minutes.** The board is a status board, not a history.
 - **Session names are auto-generated from the command** (`npm-run-dev`), deduped with `-2`, `-3`; override with `--name`.
-- **The npm package name is a placeholder and `"private": true` guards it.** `tower-cli` is already taken on npm by an unrelated package; this repo installs from source until a real name is secured.
+- **The package is `termtower`, the command is `tower`.** Plain `tower` and `tower-cli` were taken on npm by unrelated packages; one word that says what it is beat a hyphenated compromise.
 - **A signal-killed child exits `128 + signum`** (shell convention) and shows as `exited-error`, even though PTYs report such deaths with exit code 0.
 
 v1.5 additions:
