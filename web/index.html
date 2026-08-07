@@ -531,7 +531,9 @@ function updateCard(entry, s, now) {
   refs.branchSep.hidden = !showBranch;
   refs.branch.hidden = !showBranch;
   if (showBranch) refs.branch.textContent = s.gitBranch;
-  const sum = s.summary;
+  // removing the key degrades to v1 on the next refresh even though old
+  // summaries are still stored server-side
+  const sum = state.summaries && state.summaries.keyless ? null : s.summary;
   el.classList.toggle('has-story', !!sum);
   if (sum) {
     refs.doing.textContent = sum.doing || '';

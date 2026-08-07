@@ -157,7 +157,9 @@ async function cmdLs() {
     return;
   }
   const now = Date.now();
-  const showDoing = list.some((s) => s.summary && s.summary.doing);
+  // a removed key degrades ls to v1 output even while old summaries linger
+  const keyless = !!(reply.summaries && reply.summaries.keyless);
+  const showDoing = !keyless && list.some((s) => s.summary && s.summary.doing);
   const rows = list.map((s) => ({
     // name truncation exists to make room for DOING; without summaries the
     // output stays byte-identical to v1
