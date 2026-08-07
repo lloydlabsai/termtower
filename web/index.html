@@ -517,7 +517,7 @@ function render() {
     return span;
   };
   countsEl.append(
-    seg('need you', counts.need, 'need'),
+    seg(counts.need === 1 ? 'needs you' : 'need you', counts.need, 'need'),
     seg('running', counts.running, ''),
     seg('idle', counts.idle, ''),
     seg('exited', counts.exited, ''),

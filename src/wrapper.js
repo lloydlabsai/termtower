@@ -52,7 +52,7 @@ function run(argv, opts = {}) {
     id: crypto.randomUUID(),
     name: opts.name || autoName(argv),
     cwd: process.cwd(),
-    command: argv.join(' '),
+    command: argv.join(' ').replace(/\s+/g, ' ').trim(),
     pid: process.pid,
     childPid: null,
     startedAt: Date.now(),
