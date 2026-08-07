@@ -125,7 +125,7 @@
     width: 3px;
     background: var(--gone);
   }
-  .card[data-status="running"]::before { background: var(--running); }
+  .card[data-status="running"]::before, .card[data-status="active"]::before { background: var(--running); }
   .card[data-status="waiting"]::before { background: var(--waiting); }
   .card[data-status="exited-error"]::before { background: var(--error); }
   .card[data-status="idle"]::before { background: var(--idle); }
@@ -149,7 +149,7 @@
     color: var(--text-dim);
   }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gone); flex: none; }
-  [data-status="running"] .dot { background: var(--running); }
+  [data-status="running"] .dot, [data-status="active"] .dot { background: var(--running); }
   [data-status="waiting"] .dot { background: var(--waiting); }
   [data-status="exited-error"] .dot { background: var(--error); }
   [data-status="idle"] .dot { background: var(--idle); }
@@ -172,15 +172,37 @@
   }
   .ago-sub { font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
 
+  /* the name is the card's visual anchor; the command demotes to the meta line */
   .name {
     font-family: var(--mono);
-    font-size: 14.5px;
+    font-size: 16px;
     font-weight: 600;
-    margin-top: 7px;
+    line-height: 1.25;
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+    flex: 1;
+  }
+  .name-text {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .badge {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--idle);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-left: 8px;
+    transform: translateY(-2px);
+  }
+  .status-row { margin-top: 3px; }
   .meta {
     font-family: var(--mono);
     font-size: 11px;
@@ -191,6 +213,72 @@
     text-overflow: ellipsis;
   }
   .meta .sep { color: var(--text-faint); margin: 0 5px; }
+
+  /* ---------- narrative strip ----------
+     The story sits above the mechanical truth and reads as an annotation:
+     sans type against the board's mono, its own quiet inset block. */
+  .story {
+    display: none;
+    margin-top: 9px;
+    padding: 7px 10px 6px 11px;
+    background: var(--surface-deep);
+    border-left: 2px solid var(--border);
+    border-radius: 0 6px 6px 0;
+    font-family: var(--sans);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-dim);
+  }
+  .card.has-story .story { display: block; }
+  .story-line { display: flex; gap: 9px; margin: 2px 0; }
+  .story-line .k {
+    flex: none;
+    width: 28px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding-top: 2px;
+  }
+  .story-line .v { min-width: 0; }
+  .story-line.doing .v { color: var(--text); font-weight: 500; }
+  .story-age {
+    display: block;
+    text-align: right;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--text-faint);
+    margin-top: 3px;
+  }
+
+  /* ---------- notice bar (no-key hint / key trouble) ---------- */
+  .notice {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    padding: 7px 12px;
+    margin-top: 16px;
+  }
+  .notice code { color: var(--text); }
+  .notice.error { color: var(--waiting); border-color: color-mix(in srgb, var(--waiting) 30%, var(--bg)); }
+  .notice .dismiss {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 0 2px;
+  }
+  .notice .dismiss:hover { color: var(--text); }
+
   .tail {
     font-family: var(--mono);
     font-size: 11px;
@@ -255,6 +343,7 @@
   </div>
 </header>
 
+<div id="notice-slot"></div>
 <main id="board"></main>
 
 <script>
@@ -262,15 +351,17 @@
 
 const state = {
   sessions: [],          // light session records from the daemon
+  summaries: {},         // { on, keyless, error } from the daemon
   outputs: new Map(),    // id -> [lines]
   expandedId: null,
+  expandedStamp: 0,      // lastOutputAt when the expanded card was last fetched
   pinned: true,          // expanded output scrolled to bottom?
 };
 
 const ATTENTION = new Set(['waiting', 'exited-error']);
-const RANK = { waiting: 0, 'exited-error': 1, running: 2, idle: 3, stale: 4, 'exited-unknown': 5, 'exited-ok': 6 };
+const RANK = { waiting: 0, 'exited-error': 1, running: 2, active: 2, idle: 3, stale: 4, 'exited-unknown': 5, 'exited-ok': 6 };
 const LABELS = {
-  running: 'running', idle: 'idle', waiting: 'waiting on you', stale: 'disconnected',
+  running: 'running', active: 'active', idle: 'idle', waiting: 'waiting on you', stale: 'disconnected',
   'exited-ok': 'exited · ok', 'exited-error': 'exited', 'exited-unknown': 'exited',
 };
 
@@ -289,6 +380,18 @@ function fmtAgo(ms) {
   const h = Math.floor(m / 60);
   if (h < 24) return h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
   return Math.floor(h / 24) + 'd';
+}
+
+// coarse version for the staleness stamp: "as of 2m ago", not "2m 05s"
+function fmtAgoCoarse(ms) {
+  if (ms == null || !isFinite(ms) || ms < 0) return '';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return 'just now';
+  const m = Math.floor(sec / 60);
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ago';
+  return Math.floor(h / 24) + 'd ago';
 }
 
 function agoBasis(s) {
@@ -317,14 +420,18 @@ function makeCard(s) {
   el.tabIndex = 0;
   el.dataset.id = s.id;
 
+  // head: the name is the anchor, the ago-clock keeps its corner
   const head = document.createElement('div');
   head.className = 'card-head';
-  const status = document.createElement('span');
-  status.className = 'status';
-  const dot = document.createElement('span');
-  dot.className = 'dot';
-  const statusLabelEl = document.createElement('span');
-  status.append(dot, statusLabelEl);
+  const name = document.createElement('h2');
+  name.className = 'name';
+  const nameText = document.createElement('span');
+  nameText.className = 'name-text';
+  const badge = document.createElement('span');
+  badge.className = 'badge';
+  badge.textContent = 'agent';
+  badge.hidden = true;
+  name.append(nameText, badge);
   const ago = document.createElement('span');
   ago.className = 'ago';
   const agoNum = document.createElement('span');
@@ -332,10 +439,18 @@ function makeCard(s) {
   const agoSub = document.createElement('span');
   agoSub.className = 'ago-sub';
   ago.append(agoNum, agoSub);
-  head.append(status, ago);
+  head.append(name, ago);
 
-  const name = document.createElement('h2');
-  name.className = 'name';
+  const statusRow = document.createElement('div');
+  statusRow.className = 'status-row';
+  const status = document.createElement('span');
+  status.className = 'status';
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  const statusLabelEl = document.createElement('span');
+  status.append(dot, statusLabelEl);
+  statusRow.append(status);
+
   const meta = document.createElement('p');
   meta.className = 'meta';
   const cwd = document.createElement('span');
@@ -345,14 +460,41 @@ function makeCard(s) {
   sep.textContent = '·';
   const cmd = document.createElement('span');
   cmd.className = 'cmd';
-  meta.append(cwd, sep, cmd);
+  const branchSep = document.createElement('span');
+  branchSep.className = 'sep';
+  branchSep.textContent = '·';
+  const branch = document.createElement('span');
+  branch.className = 'branch';
+  meta.append(cwd, sep, cmd, branchSep, branch);
+
+  // narrative strip: doing / last / next, clearly a layer above the mechanics
+  const story = document.createElement('div');
+  story.className = 'story';
+  const storyRow = (cls, label) => {
+    const row = document.createElement('p');
+    row.className = 'story-line ' + cls;
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'v';
+    row.append(k, v);
+    story.append(row);
+    return v;
+  };
+  const doing = storyRow('doing', 'now');
+  const last = storyRow('last', 'last');
+  const next = storyRow('next', 'next');
+  const storyAge = document.createElement('span');
+  storyAge.className = 'story-age';
+  story.append(storyAge);
 
   const tail = document.createElement('p');
   tail.className = 'tail';
   const output = document.createElement('pre');
   output.className = 'output';
 
-  el.append(head, name, meta, tail, output);
+  el.append(head, statusRow, meta, story, tail, output);
 
   el.addEventListener('click', (e) => {
     if (output.contains(e.target)) return; // let people select text
@@ -367,7 +509,7 @@ function makeCard(s) {
     }
   });
 
-  return { el, refs: { statusLabelEl, agoNum, agoSub, name, cwd, cmd, tail, output } };
+  return { el, refs: { statusLabelEl, agoNum, agoSub, nameText, badge, cwd, cmd, branchSep, branch, doing, last, next, storyAge, tail, output } };
 }
 
 function updateCard(entry, s, now) {
@@ -375,10 +517,25 @@ function updateCard(entry, s, now) {
   el.dataset.status = s.status;
   refs.statusLabelEl.textContent = statusLabel(s);
   refs.agoNum.textContent = fmtAgo(now - agoBasis(s));
-  refs.agoSub.textContent = s.exited ? 'since exit' : 'since output';
-  refs.name.textContent = s.name;
+  refs.agoSub.textContent = s.exited ? 'since exit' : s.kind === 'claude' ? 'since activity' : 'since output';
+  refs.nameText.textContent = s.name;
+  refs.nameText.title = s.name || '';
+  refs.badge.hidden = s.kind !== 'claude';
   refs.cwd.textContent = shortenCwd(s.cwd);
   refs.cmd.textContent = s.command;
+  refs.cmd.title = s.command || '';
+  const showBranch = !!(s.kind === 'claude' && s.gitBranch);
+  refs.branchSep.hidden = !showBranch;
+  refs.branch.hidden = !showBranch;
+  if (showBranch) refs.branch.textContent = s.gitBranch;
+  const sum = s.summary;
+  el.classList.toggle('has-story', !!sum);
+  if (sum) {
+    refs.doing.textContent = sum.doing || '';
+    refs.last.textContent = sum.last || '';
+    refs.next.textContent = sum.next || '';
+    refs.storyAge.textContent = 'as of ' + fmtAgoCoarse(now - (sum.summarizedAt || now));
+  }
   refs.tail.textContent = el.classList.contains('expanded') ? '' : (s.tail || '');
 }
 
@@ -389,15 +546,7 @@ function setOutput(entry, lines) {
   if (stick) out.scrollTop = out.scrollHeight;
 }
 
-async function toggleExpand(id) {
-  if (state.expandedId === id) {
-    state.expandedId = null;
-    render();
-    return;
-  }
-  state.expandedId = id;
-  state.pinned = true;
-  render();
+async function fetchOutput(id) {
   try {
     const r = await fetch('/api/session/' + id);
     if (r.ok) {
@@ -407,6 +556,19 @@ async function toggleExpand(id) {
       if (entry && state.expandedId === id) setOutput(entry, data.lines);
     }
   } catch { /* the SSE stream will fill it in */ }
+}
+
+function toggleExpand(id) {
+  if (state.expandedId === id) {
+    state.expandedId = null;
+    render();
+    return;
+  }
+  state.expandedId = id;
+  state.expandedStamp = 0;
+  state.pinned = true;
+  render();
+  fetchOutput(id);
 }
 
 // ---------- board rendering ----------
@@ -499,10 +661,10 @@ function render() {
     if (!seen.has(id)) { entry.el.remove(); cards.delete(id); }
   }
 
-  // header counts
+  // header counts (active claude sessions count as running)
   const counts = { need: need.length, running: 0, idle: 0, exited: 0 };
   for (const s of state.sessions) {
-    if (s.status === 'running') counts.running++;
+    if (s.status === 'running' || s.status === 'active') counts.running++;
     else if (s.status === 'idle') counts.idle++;
     else if (s.exited || s.status === 'stale') counts.exited++;
   }
@@ -525,11 +687,63 @@ function render() {
   document.title = counts.need ? `(${counts.need}) tower` : 'tower';
 }
 
+// ---------- notice bar: key trouble, or a one-time dismissible hint ----------
+
+const noticeSlot = document.getElementById('notice-slot');
+const HINT_DISMISSED_KEY = 'tower-hint-dismissed';
+
+function renderNotice() {
+  const sum = state.summaries || {};
+  let mode = null;
+  if (sum.error) mode = 'error';
+  else if (sum.keyless && !localStorage.getItem(HINT_DISMISSED_KEY)) mode = 'hint';
+  const current = noticeSlot.dataset.mode || '';
+  if (current === (mode || '')) {
+    if (mode === 'error') noticeSlot.querySelector('.text').textContent = 'summaries off: ' + sum.error;
+    return;
+  }
+  noticeSlot.dataset.mode = mode || '';
+  noticeSlot.textContent = '';
+  if (!mode) return;
+  const bar = document.createElement('div');
+  bar.className = 'notice' + (mode === 'error' ? ' error' : '');
+  const text = document.createElement('span');
+  text.className = 'text';
+  if (mode === 'error') {
+    text.textContent = 'summaries off: ' + sum.error;
+    bar.append(text);
+  } else {
+    text.textContent = 'add an API key to see what each session is doing: ';
+    const code = document.createElement('code');
+    code.textContent = 'tower config set anthropic_key sk-…';
+    const dismiss = document.createElement('button');
+    dismiss.className = 'dismiss';
+    dismiss.title = 'dismiss';
+    dismiss.textContent = '×';
+    dismiss.addEventListener('click', () => {
+      localStorage.setItem(HINT_DISMISSED_KEY, '1');
+      renderNotice();
+    });
+    bar.append(text, code, dismiss);
+  }
+  noticeSlot.append(bar);
+}
+
 // ---------- live data ----------
 
-function applySessions(sessions) {
+function applySessions(sessions, summaries) {
   state.sessions = sessions;
+  if (summaries) state.summaries = summaries;
+  renderNotice();
   render();
+  // an expanded transcript card has no output stream; refetch when it moves
+  if (state.expandedId && state.expandedId.startsWith('cc-')) {
+    const s = sessions.find((x) => x.id === state.expandedId);
+    if (s && s.lastOutputAt !== state.expandedStamp) {
+      state.expandedStamp = s.lastOutputAt;
+      fetchOutput(s.id);
+    }
+  }
 }
 
 const conn = document.getElementById('conn');
@@ -541,7 +755,7 @@ es.onerror = () => { conn.classList.add('down'); connLabel.textContent = 'reconn
 es.onmessage = (e) => {
   let msg = null;
   try { msg = JSON.parse(e.data); } catch { return; }
-  if (msg.type === 'sessions') applySessions(msg.sessions || []);
+  if (msg.type === 'sessions') applySessions(msg.sessions || [], msg.summaries);
   else if (msg.type === 'output') {
     state.outputs.set(msg.id, msg.lines || []);
     if (state.expandedId === msg.id) {
@@ -551,7 +765,7 @@ es.onmessage = (e) => {
   }
 };
 
-fetch('/api/state').then((r) => r.json()).then((d) => applySessions(d.sessions || [])).catch(() => {});
+fetch('/api/state').then((r) => r.json()).then((d) => applySessions(d.sessions || [], d.summaries)).catch(() => {});
 
 // local ticks keep the ago-clocks honest between server pushes
 setInterval(() => { if (state.sessions.length) render(); }, 1000);

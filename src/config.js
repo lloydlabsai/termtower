@@ -106,15 +106,20 @@ function looksLikeAnthropicKey(value) {
   return /^sk-[\w-]{20,}$/.test(String(value || ''));
 }
 
-// mtime-based cache so the daemon can consult config every second for free.
+// Stat-based cache so the daemon can consult config every second for free.
+// Size is part of the signature: Windows mtime granularity can swallow two
+// writes in the same tick.
 let cached = null;
-let cachedMtime = -1;
+let cachedSig = '';
 function effectiveCached(file = proto.configPath()) {
-  let mtime = 0;
-  try { mtime = fs.statSync(file).mtimeMs; } catch { mtime = 0; }
-  if (!cached || mtime !== cachedMtime) {
+  let sig = 'absent';
+  try {
+    const st = fs.statSync(file);
+    sig = `${st.mtimeMs}:${st.size}`;
+  } catch { /* missing file is a valid state */ }
+  if (!cached || sig !== cachedSig) {
     cached = effective(load(file));
-    cachedMtime = mtime;
+    cachedSig = sig;
   }
   return cached;
 }

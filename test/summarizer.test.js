@@ -204,8 +204,10 @@ test('no key or summaries disabled: never calls, never errors', async () => {
     await s._tick();
     assert.strictEqual(api.state.calls, 0);
     assert.strictEqual(s.meta().on, false);
+    assert.strictEqual(s.meta().keyless, true);
     writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa', summaries: { enabled: false } });
     await s._tick();
     assert.strictEqual(api.state.calls, 0);
+    assert.strictEqual(s.meta().keyless, false); // key present, disabled on purpose: no hint
   } finally { await api.close(); }
 });

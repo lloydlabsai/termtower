@@ -104,11 +104,15 @@ function createSummarizer({ collect, notify, log }) {
   let badKey = null;
   let lastError = null;
 
-  // What ls/board show. `on` means "a key is present and summaries enabled".
+  // What ls/board show. `on` means "a key is present and summaries enabled";
+  // `keyless` drives the board's one-time hint (a disabled-on-purpose setup
+  // with a key present should never be nagged).
   function meta() {
     const eff = config.effectiveCached();
+    const key = config.apiKey(eff);
     return {
-      on: !!(config.apiKey(eff) && eff.summaries.enabled && !lastError),
+      on: !!(key && eff.summaries.enabled && !lastError),
+      keyless: !key,
       error: lastError,
     };
   }
