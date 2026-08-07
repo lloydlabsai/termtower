@@ -1,4 +1,4 @@
-# tower
+<img src="docs/wordmark.png" alt="termtower" width="430">
 
 A live control tower for all of your terminal sessions.
 
