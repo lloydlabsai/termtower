@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const proto = require('./protocol');
 const config = require('./config');
-const { createSummarizer } = require('./summarizer');
+const { createSummarizer, sanitizeStoredSummary, sanitizeStoredHistory } = require('./summarizer');
 const { createClaudeWatch, deriveClaudeStatus } = require('./claudewatch');
 const { createMailroom } = require('./mailroom');
 
@@ -481,11 +481,13 @@ const httpServer = http.createServer((req, res) => {
     if (cc) {
       const lines = (cc.turns || []).flatMap((t) => [`${t.role}:`, ...t.text.split('\n'), '']);
       const claimedBy = claudeClaims().get(cc.id);
-      return json(res, 200, { ...lightClaude(cc), lines, mail: mailroom.fetch(claimedBy ? claimedBy.id : cc.id, { peek: true }), summaryHistory: cc.summaryHistory || [] });
+      const ccDepth = config.effectiveCached().summaries.history_depth;
+      return json(res, 200, { ...lightClaude(cc), lines, mail: mailroom.fetch(claimedBy ? claimedBy.id : cc.id, { peek: true }), summaryHistory: (cc.summaryHistory || []).slice(0, ccDepth) });
     }
     const sess = sessions.get(m[1]);
     if (!sess) return json(res, 404, { error: 'no such session' });
-    return json(res, 200, { ...lightSession(sess), lines: sess.buffer.toLines(), mail: mailroom.fetch(sess.id, { peek: true }), summaryHistory: sess.summaryHistory || [] });
+    const wDepth = config.effectiveCached().summaries.history_depth;
+    return json(res, 200, { ...lightSession(sess), lines: sess.buffer.toLines(), mail: mailroom.fetch(sess.id, { peek: true }), summaryHistory: (sess.summaryHistory || []).slice(0, wDepth) });
   }
   return json(res, 404, { error: 'not found' });
 });
@@ -614,8 +616,8 @@ function loadState() {
       pty: !!s.pty,
       buffer,
       sock: null,
-      summary: s.summary || null,
-      summaryHistory: Array.isArray(s.summaryHistory) ? s.summaryHistory : [],
+      summary: sanitizeStoredSummary(s.summary),
+      summaryHistory: sanitizeStoredHistory(s.summaryHistory, config.effectiveCached().summaries.history_depth),
       summaryCtl: { sig: s.summarySig || undefined, exitDone: !!s.summaryExitDone },
     };
     if (!sess.exited) {
@@ -725,11 +727,20 @@ const server = net.createServer((sock) => {
       case 'history': {
         const r = findSession(msg.name);
         if (r.error) { proto.send(sock, { type: 'error', message: r.error }); break; }
+        // For a merged pair the story accrues on the transcript record (the
+        // claimed wrapper is never summarized); a history read of the wrapper
+        // - which is what TOWER_SESSION names - must reach the story side.
+        let target = r.session;
+        for (const [ccId, w] of claudeClaims()) {
+          if (w.id === target.id) { target = claudeWatch.get(ccId) || target; break; }
+        }
+        const depth = config.effectiveCached().summaries.history_depth;
         proto.send(sock, {
           type: 'history',
-          name: r.session.name,
-          current: r.session.summary || null,
-          history: r.session.summaryHistory || [],
+          name: target.name,
+          keyless: summarizer.meta().keyless,
+          current: target.summary || null,
+          history: (target.summaryHistory || []).slice(0, depth),
         });
         break;
       }

@@ -375,9 +375,14 @@ async function cmdHistory(argv) {
     process.exitCode = 1;
     return;
   }
+  // same convention as ls and the board: no key, no narrative surfaces
+  if (reply.keyless) {
+    console.log('summaries are off (no API key configured); nothing to show');
+    return;
+  }
   const entries = [];
   if (reply.current) entries.push(reply.current);
-  entries.push(...(reply.history || []));
+  entries.push(...(reply.history || []).filter(Boolean));
   if (entries.length === 0) {
     console.log(`no summaries yet for ${reply.name}`);
     return;

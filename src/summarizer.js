@@ -107,6 +107,25 @@ function parseSummary(text) {
   return { doing, last: clean(obj.last), next: clean(obj.next) };
 }
 
+// Stored summaries re-entering from state.json get the same treatment fresh
+// model output gets (DOCTRINE rule 1: state files are a path like any other).
+// Returns a clean summary or null.
+function sanitizeStoredSummary(v) {
+  if (!v || typeof v !== 'object') return null;
+  const clean = (x) => {
+    if (typeof x !== 'string') return null;
+    const s = x.replace(SUMMARY_ANSI_RE, '').replace(SUMMARY_CTRL_RE, ' ').trim();
+    return s ? s.slice(0, MAX_FIELD_CHARS) : null;
+  };
+  const doing = clean(v.doing);
+  if (!doing) return null;
+  return { doing, last: clean(v.last), next: clean(v.next), summarizedAt: Number(v.summarizedAt) || 0 };
+}
+
+function sanitizeStoredHistory(arr, depth) {
+  return (Array.isArray(arr) ? arr : []).map(sanitizeStoredSummary).filter(Boolean).slice(0, depth);
+}
+
 // collect() -> iterable of session records. A record is summarizable when it
 // has id/name/cwd/command and either a live `buffer` (wrapped session) or a
 // `narrative()` method (transcript-backed session, see claudewatch.js).
@@ -270,4 +289,4 @@ function createSummarizer({ collect, notify, log, isLive = () => true }) {
   };
 }
 
-module.exports = { createSummarizer, parseSummary, meaningfulLines, isNoise, hashLines };
+module.exports = { createSummarizer, parseSummary, meaningfulLines, isNoise, hashLines, sanitizeStoredSummary, sanitizeStoredHistory };

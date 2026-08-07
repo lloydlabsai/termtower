@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const proto = require('./protocol');
 const config = require('./config');
-const { hashLines } = require('./summarizer');
+const { hashLines, sanitizeStoredSummary, sanitizeStoredHistory } = require('./summarizer');
 
 const POLL_MS = 10000;              // directory sweep cadence
 const SHOW_WINDOW_MS = 45 * 60000;  // transcripts quiet longer than this drop off the board
@@ -125,8 +125,9 @@ function createClaudeWatch({ notify, log }) {
       };
       const prev = restored.get(id);
       if (prev) {
-        rec.summary = prev.summary || null;
-        rec.summaryHistory = Array.isArray(prev.history) ? prev.history : [];
+        // state.json is a path like any other: re-sanitize on the way in
+        rec.summary = sanitizeStoredSummary(prev.summary);
+        rec.summaryHistory = sanitizeStoredHistory(prev.history, config.effectiveCached().summaries.history_depth);
         rec.summaryCtl.sig = prev.sig;
         restored.delete(id);
       }

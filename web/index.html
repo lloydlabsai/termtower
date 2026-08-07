@@ -649,7 +649,7 @@ function makeCard(s) {
 // Prior chapters, newest first; read-only, no pagination, no export.
 function setHistory(entry, items) {
   const { historyToggle, history } = entry.refs;
-  const list = items || [];
+  const list = (items || []).filter((h) => h && h.doing);
   historyToggle.classList.toggle('avail', list.length > 0);
   history.textContent = '';
   if (!list.length) {
@@ -1054,11 +1054,13 @@ function applySessions(sessions, summaries) {
     lastAutoSearch = Date.now();
     doSearch(state.searchQ);
   }
-  // an expanded transcript card has no output stream; refetch when it moves
-  if (state.expandedId && state.expandedId.startsWith('cc-')) {
+  // keep the expanded card's detail (transcript turns, mail, history) fresh:
+  // refetch when the session moves, at most once a second
+  if (state.expandedId) {
     const s = sessions.find((x) => x.id === state.expandedId);
-    if (s && s.lastOutputAt !== state.expandedStamp) {
+    if (s && s.lastOutputAt !== state.expandedStamp && Date.now() - (state.expandedFetchAt || 0) > 1000) {
       state.expandedStamp = s.lastOutputAt;
+      state.expandedFetchAt = Date.now();
       fetchOutput(s.id);
     }
   }

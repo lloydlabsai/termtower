@@ -10,7 +10,7 @@ delete process.env.ANTHROPIC_API_KEY;
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
-const { createSummarizer, parseSummary, meaningfulLines } = require('../src/summarizer');
+const { createSummarizer, parseSummary, meaningfulLines, sanitizeStoredSummary, sanitizeStoredHistory } = require('../src/summarizer');
 const proto = require('../src/protocol');
 
 function writeConfig(cfg) {
@@ -274,6 +274,25 @@ test('parseSummary strips ANSI and control bytes from model output', () => {
     assert.ok(!/[ -]/.test(v), 'control byte survived in ' + JSON.stringify(v));
   }
   assert.match(p.next, /probably fine/);
+});
+
+test('stored summaries re-entering from state.json are sanitized, validated, and clamped', () => {
+  // hostile doing with real escape bytes
+  const dirty = { doing: 'pwned ]0;title here [2J', last: null, next: 'ok', summarizedAt: 5 };
+  const clean = sanitizeStoredSummary(dirty);
+  assert.ok(!/[\x00-\x1f\x7f]/.test(clean.doing), 'escape bytes survived restore');
+  assert.match(clean.doing, /pwned/);
+  assert.strictEqual(clean.last, null);
+  assert.strictEqual(clean.next, 'ok');
+  // garbage shapes die quietly
+  assert.strictEqual(sanitizeStoredSummary(null), null);
+  assert.strictEqual(sanitizeStoredSummary('a string'), null);
+  assert.strictEqual(sanitizeStoredSummary({ last: 'no doing' }), null);
+  // over-depth and null-riddled arrays come back bounded and clean
+  const arr = [null, dirty, 'junk', ...Array.from({ length: 20 }, (_, i) => ({ doing: 'gen ' + i, summarizedAt: i }))];
+  const hist = sanitizeStoredHistory(arr, 5);
+  assert.strictEqual(hist.length, 5);
+  assert.ok(hist.every((h) => h && typeof h.doing === 'string'));
 });
 
 test('superseded summaries ring up newest-first, hard-capped at history_depth', async () => {
