@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const proto = require('./protocol');
 const { createSummarizer } = require('./summarizer');
+const { createClaudeWatch, deriveClaudeStatus } = require('./claudewatch');
 
 const WEB_DIR = path.join(__dirname, '..', 'web');
 
@@ -17,10 +18,16 @@ function log(...args) {
   console.log(new Date().toISOString(), ...args);
 }
 
+// Claude Code transcripts as a second card source; absent dir = no cards.
+const claudeWatch = createClaudeWatch({
+  notify: () => notifyChange(),
+  log,
+});
+
 // The narrative layer: no key configured means this never makes a call and
 // the board behaves exactly as v1.
 const summarizer = createSummarizer({
-  collect: () => sessions.values(),
+  collect: () => [...sessions.values(), ...claudeWatch.records()],
   notify: () => notifyChange(),
   log,
 });
@@ -117,8 +124,65 @@ function lightSession(sess, now = Date.now()) {
   };
 }
 
+function lightClaude(rec, now = Date.now()) {
+  const lastTurn = rec.turns && rec.turns.length ? rec.turns[rec.turns.length - 1] : null;
+  return {
+    id: rec.id,
+    name: rec.name,
+    cwd: rec.cwd,
+    command: rec.command,
+    pid: null,
+    childPid: null,
+    startedAt: rec.startedAt,
+    lastOutputAt: rec.lastActivityAt,
+    exited: false,
+    exitCode: null,
+    exitSignal: null,
+    exitedAt: null,
+    stale: false,
+    pty: false,
+    status: deriveClaudeStatus(rec, now),
+    tail: lastTurn ? `${lastTurn.role}: ${lastTurn.text.replace(/\s+/g, ' ')}`.slice(0, 160) : '',
+    kind: 'claude',
+    gitBranch: rec.gitBranch || null,
+    summary: rec.summary || null,
+  };
+}
+
+const CLAUDE_CMD_RE = /(^|[\\/\s])claude(\.exe|\.cmd)?(\s|$)/i;
+
+function normCwd(p) {
+  let s = String(p || '').replace(/[\\/]+$/, '');
+  if (process.platform === 'win32') s = s.replace(/\//g, '\\').toLowerCase();
+  return s;
+}
+
 function lightList() {
-  return [...sessions.values()].map((s) => lightSession(s));
+  const now = Date.now();
+  const wrapped = [...sessions.values()].map((s) => lightSession(s, now));
+  const agents = [...claudeWatch.records()].map((r) => lightClaude(r, now))
+    .sort((a, b) => (b.lastOutputAt || 0) - (a.lastOutputAt || 0));
+  // A `tower run claude` wrapper and a transcript in the same cwd are the same
+  // session. The transcript card wins (it knows what the work is about); the
+  // wrapper lends mechanical truth, and its terminal prompt state beats
+  // file-mtime guesses for "waiting".
+  const out = [];
+  const claimed = new Set();
+  for (const a of agents) {
+    const w = wrapped.find((s) => !claimed.has(s.id) && !s.exited &&
+      CLAUDE_CMD_RE.test(s.command) && normCwd(s.cwd) === normCwd(a.cwd));
+    if (w) {
+      claimed.add(w.id);
+      a.viaWrapper = w.name;
+      a.pid = w.pid;
+      a.childPid = w.childPid;
+      if (w.tail) a.tail = w.tail;
+      if (w.status === 'waiting') a.status = 'waiting';
+    }
+    out.push(a);
+  }
+  for (const s of wrapped) if (!claimed.has(s.id)) out.push(s);
+  return out;
 }
 
 // "daemon" is reserved so `tower kill daemon` is unambiguous.
@@ -234,6 +298,11 @@ const httpServer = http.createServer((req, res) => {
   if (u.pathname === '/api/events') return serveEvents(req, res);
   const m = u.pathname.match(/^\/api\/session\/([\w-]+)$/);
   if (m) {
+    const cc = claudeWatch.get(m[1]);
+    if (cc) {
+      const lines = (cc.turns || []).flatMap((t) => [`${t.role}:`, ...t.text.split('\n'), '']);
+      return json(res, 200, { ...lightClaude(cc), lines });
+    }
     const sess = sessions.get(m[1]);
     if (!sess) return json(res, 404, { error: 'no such session' });
     return json(res, 200, { ...lightSession(sess), lines: sess.buffer.toLines() });
@@ -319,6 +388,7 @@ function saveStateNow() {
   const data = {
     savedAt: Date.now(),
     sessions: [...sessions.values()].map((s) => ({ ...lightSession(s), lines: s.buffer.toLines() })),
+    claude: claudeWatch.persistable(),
   };
   try { fs.writeFileSync(proto.statePath(), JSON.stringify(data), { mode: 0o600 }); } catch { /* best effort */ }
 }
@@ -326,6 +396,7 @@ function saveStateNow() {
 function loadState() {
   let data = null;
   try { data = JSON.parse(fs.readFileSync(proto.statePath(), 'utf8')); } catch { return; }
+  claudeWatch.restore(data.claude);
   const now = Date.now();
   for (const s of data.sessions || []) {
     if (!s || typeof s.id !== 'string') continue;
@@ -546,6 +617,7 @@ function start() {
   loadState();
   claimSocketAndListen(() => {
     startHttp();
+    claudeWatch.start();
     summarizer.start();
     // Statuses drift with time (running -> idle -> waiting); keep watchers current.
     setInterval(() => {

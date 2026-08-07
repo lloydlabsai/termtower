@@ -11,6 +11,7 @@ const proto = require('../src/protocol');
 const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const COLORS = {
   running: '\x1b[32m',       // green
+  active: '\x1b[32m',        // green (claude code sessions)
   idle: '\x1b[90m',          // gray
   waiting: '\x1b[33m',       // yellow
   stale: '\x1b[90m',
@@ -126,6 +127,7 @@ const ATTENTION_RANK = {
   waiting: 0,
   'exited-error': 1,
   running: 2,
+  active: 2,
   idle: 3,
   stale: 4,
   'exited-unknown': 5,
@@ -156,7 +158,7 @@ async function cmdLs() {
   const now = Date.now();
   const showDoing = list.some((s) => s.summary && s.summary.doing);
   const rows = list.map((s) => ({
-    name: s.name,
+    name: truncate(s.name, 28),
     status: s.status,
     last: s.exited ? fmtDur(now - (s.exitedAt || now)) : fmtDur(now - (s.lastOutputAt || now)),
     pid: String(s.childPid || s.pid || '-'),
