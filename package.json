@@ -1,6 +1,7 @@
 {
   "name": "tower-cli",
   "version": "0.1.0",
+  "private": true,
   "description": "A live control tower for all of your terminal sessions.",
   "license": "MIT",
   "bin": {

@@ -42,22 +42,30 @@ function collapseCR(seg) {
   return line;
 }
 
+// An escape sequence split across two output chunks must be reassembled before
+// stripping, so the partial line is stored RAW and sanitized only when the line
+// completes (or on read, for display).
+function sanitizePartial(raw) {
+  // also trim a trailing incomplete escape so it never shows as literal junk
+  return sanitize(String(raw).replace(/\x1b(?:\[[0-9;?]*[ -\/]*|\][^\x07\x1b]*|)$/, ''));
+}
+
 class RingBuffer {
   constructor(maxLines = 200) {
     this.maxLines = maxLines;
     this.lines = [];
-    this.partial = ''; // the unterminated last line; this is where prompts live
+    this.partial = ''; // the unterminated last line, raw; this is where prompts live
   }
   push(chunk) {
-    const data = this.partial + sanitize(chunk).replace(/\r\n/g, '\n');
+    const data = (this.partial + String(chunk)).replace(/\r\n/g, '\n');
     const segs = data.split('\n');
     this.partial = segs.pop();
-    for (const seg of segs) this.lines.push(collapseCR(seg));
-    if (this.partial.length > 4000) this.partial = collapseCR(this.partial).slice(-4000);
+    for (const seg of segs) this.lines.push(collapseCR(sanitize(seg)));
+    if (this.partial.length > 4000) this.partial = this.partial.slice(-4000);
     if (this.lines.length > this.maxLines) this.lines.splice(0, this.lines.length - this.maxLines);
   }
   tailLine() {
-    const p = collapseCR(this.partial);
+    const p = collapseCR(sanitizePartial(this.partial));
     if (p.trim() !== '') return p;
     for (let i = this.lines.length - 1; i >= 0; i--) {
       if (this.lines[i].trim() !== '') return this.lines[i];
@@ -66,7 +74,7 @@ class RingBuffer {
   }
   toLines() {
     const out = this.lines.slice();
-    const p = collapseCR(this.partial);
+    const p = collapseCR(sanitizePartial(this.partial));
     if (p !== '') out.push(p);
     return out.slice(-this.maxLines);
   }
@@ -278,7 +286,7 @@ function startHttp() {
   httpServer.on('listening', () => {
     httpPort = httpServer.address().port;
     try {
-      fs.writeFileSync(proto.daemonInfoPath(), JSON.stringify({ pid: process.pid, port: httpPort, startedAt: Date.now() }));
+      fs.writeFileSync(proto.daemonInfoPath(), JSON.stringify({ pid: process.pid, port: httpPort, startedAt: Date.now() }), { mode: 0o600 });
     } catch (e) { log('could not write daemon.json:', e.message); }
     log(`status board on http://127.0.0.1:${httpPort}/`);
   });
@@ -301,7 +309,7 @@ function saveStateNow() {
     savedAt: Date.now(),
     sessions: [...sessions.values()].map((s) => ({ ...lightSession(s), lines: s.buffer.toLines() })),
   };
-  try { fs.writeFileSync(proto.statePath(), JSON.stringify(data)); } catch { /* best effort */ }
+  try { fs.writeFileSync(proto.statePath(), JSON.stringify(data), { mode: 0o600 }); } catch { /* best effort */ }
 }
 
 function loadState() {
@@ -387,6 +395,7 @@ const server = net.createServer((sock) => {
         if (sess && typeof msg.chunk === 'string') {
           sess.buffer.push(msg.chunk);
           sess.lastOutputAt = Date.now();
+          sess.stale = false; // output is proof of life
           outputChanged(sess.id);
           notifyChange();
         }
@@ -414,53 +423,114 @@ const server = net.createServer((sock) => {
     }
   });
   sock.on('close', () => {
-    if (sessionId) markDisconnected(sessionId);
+    if (!sessionId) return;
+    // Only the session's CURRENT socket closing means the wrapper is gone;
+    // a late close from a superseded connection must not mark it stale.
+    const sess = sessions.get(sessionId);
+    if (sess && sess.sock !== sock) return;
+    markDisconnected(sessionId);
   });
 });
+
+let boundSocket = false; // never unlink a socket path this process does not own
 
 function shutdown(code) {
   saveStateNow();
   try { server.close(); } catch { /* already closed */ }
   try { httpServer.close(); } catch { /* already closed */ }
   for (const res of sseClients) { try { res.end(); } catch { /* fine */ } }
-  try { fs.unlinkSync(proto.daemonInfoPath()); } catch { /* fine */ }
+  if (boundSocket) {
+    try { fs.unlinkSync(proto.daemonInfoPath()); } catch { /* fine */ }
+  }
   removeSocketFile();
   process.exit(code);
 }
 
 function removeSocketFile() {
-  if (process.platform !== 'win32') {
+  if (boundSocket && process.platform !== 'win32') {
     try { fs.unlinkSync(proto.socketPath()); } catch { /* fine */ }
   }
 }
 
+// Claim the socket bind-first: EADDRINUSE means a live daemon (bow out) or a
+// stale file from a crash. Stale recovery (unlink + rebind) is serialized
+// through an O_EXCL lock file so two racing daemons cannot unlink each other's
+// freshly bound socket.
 function claimSocketAndListen(onReady) {
   const sp = proto.socketPath();
-  // If another daemon is alive, bow out quietly.
-  const probe = net.createConnection(sp);
-  probe.on('connect', () => {
-    probe.end();
+  const lockPath = path.join(proto.TOWER_DIR, 'towerd.lock');
+  let recovered = false;
+
+  function bowOut() {
     log('another towerd is already running; exiting');
     process.exit(0);
-  });
-  probe.on('error', () => {
-    // Nothing answered. On unix a stale socket file may remain from a crash.
+  }
+
+  function recoverStaleSocket() {
+    if (recovered) {
+      log(`cannot claim ${sp}`);
+      process.exit(1);
+    }
+    recovered = true;
+    let locked = false;
+    try {
+      const fd = fs.openSync(lockPath, 'wx', 0o600);
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      locked = true;
+    } catch {
+      let owner = NaN;
+      try { owner = parseInt(fs.readFileSync(lockPath, 'utf8'), 10); } catch { /* fine */ }
+      if (owner && pidAlive(owner)) bowOut(); // someone else is mid-recovery
+      // stale lock from a crashed recovery; steal it once
+      try { fs.unlinkSync(lockPath); } catch { /* fine */ }
+      try {
+        const fd = fs.openSync(lockPath, 'wx', 0o600);
+        fs.writeSync(fd, String(process.pid));
+        fs.closeSync(fd);
+        locked = true;
+      } catch { bowOut(); }
+    }
+    if (!locked) bowOut();
     if (process.platform !== 'win32') {
       try { fs.unlinkSync(sp); } catch { /* fine */ }
     }
-    server.on('error', (e) => {
+    server.listen(sp);
+  }
+
+  server.on('error', (e) => {
+    if (e.code !== 'EADDRINUSE') {
       log('socket server error:', e.message);
       process.exit(1);
-    });
-    server.listen(sp, () => {
-      log(`towerd listening on ${sp}`);
-      onReady();
-    });
+    }
+    // Someone holds the path. A live daemon answers a probe; silence means a
+    // stale file left by a crash.
+    const probe = net.createConnection(sp);
+    probe.on('connect', () => { probe.end(); bowOut(); });
+    probe.on('error', recoverStaleSocket);
   });
+
+  server.on('listening', () => {
+    boundSocket = true;
+    try { fs.unlinkSync(lockPath); } catch { /* fine (only ours if we recovered) */ }
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(sp, 0o600); } catch { /* best effort */ }
+    }
+    log(`towerd listening on ${sp}`);
+    onReady();
+  });
+
+  server.listen(sp);
 }
 
 function start() {
   proto.ensureTowerDir();
+  if (process.platform !== 'win32') {
+    // files created by older versions may predate the 0600 modes
+    for (const f of [proto.statePath(), proto.daemonInfoPath(), proto.daemonLogPath()]) {
+      try { fs.chmodSync(f, 0o600); } catch { /* fine */ }
+    }
+  }
   loadState();
   claimSocketAndListen(() => {
     startHttp();

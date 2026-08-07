@@ -59,17 +59,22 @@ function rawRequest(msg, timeoutMs = 2000) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-async function startDaemon() {
+function spawnDaemonDetached() {
   proto.ensureTowerDir();
-  const logFd = fs.openSync(proto.daemonLogPath(), 'a');
+  const logFd = fs.openSync(proto.daemonLogPath(), 'a', 0o600);
   const child = cp.spawn(process.execPath, [path.join(__dirname, '..', 'src', 'daemon.js')], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
     cwd: proto.TOWER_DIR,
     windowsHide: true,
   });
+  child.on('error', () => { /* surfaced by the ping retries */ });
   child.unref();
   fs.closeSync(logFd);
+}
+
+async function startDaemon() {
+  spawnDaemonDetached();
   for (let i = 0; i < 40; i++) {
     try { await rawRequest({ type: 'ping' }, 500); return; } catch { await sleep(100); }
   }
@@ -179,11 +184,11 @@ async function cmdRun(argv) {
     console.error('tower: "daemon" is a reserved name');
     process.exit(1);
   }
-  try {
-    await request({ type: 'ping' });
-  } catch {
-    process.stderr.write('[tower] daemon unreachable; session will not appear on the board\n');
-  }
+  // Never let daemon health delay the user's command: a short ping decides
+  // whether to spawn towerd, and the wrapper's reconnect loop does the rest.
+  rawRequest({ type: 'ping' }, 800).catch(() => {
+    try { spawnDaemonDetached(); } catch { /* the session simply stays off the board */ }
+  });
   const wrapper = require('../src/wrapper');
   wrapper.run(rest, { name });
 }
@@ -199,11 +204,14 @@ async function cmdOpen() {
   } catch { /* fall back to default */ }
   const url = `http://127.0.0.1:${port}/`;
   const platform = process.platform;
-  try {
-    if (platform === 'darwin') cp.spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
-    else if (platform === 'win32') cp.spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
-    else cp.spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
-  } catch { /* printing the URL below is enough */ }
+  const opener = platform === 'darwin' ? ['open', [url]]
+    : platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
+    : ['xdg-open', [url]];
+  const child = cp.spawn(opener[0], opener[1], { detached: true, stdio: 'ignore' });
+  // spawn ENOENT arrives as an async 'error' event (xdg-open is often absent
+  // on minimal Linux); the printed URL is the fallback.
+  child.on('error', () => {});
+  child.unref();
   console.log(`tower board: ${url}`);
 }
 

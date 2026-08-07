@@ -5,6 +5,7 @@
 // does not appear on the board.
 
 const net = require('net');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const cp = require('child_process');
@@ -15,7 +16,14 @@ try { pty = require('node-pty'); } catch { /* fall back to plain pipes */ }
 
 const OUTPUT_FLUSH_MS = 100;
 const OUTPUT_CAP = 64 * 1024; // keep only the tail; the daemon only keeps ~200 lines anyway
-const RECONNECT_MS = 5000;
+const RECONNECT_DELAYS_MS = [1000, 2000, 5000]; // fast first retries, then steady
+
+// Shell convention: a signal death exits 128 + signum. node-pty reports the
+// signal as a number, child_process as a string name.
+function signalExitCode(signal) {
+  if (typeof signal === 'number') return 128 + signal;
+  return 128 + (os.constants.signals[signal] || 15);
+}
 
 function autoName(argv) {
   const parts = [];
@@ -91,6 +99,7 @@ function run(argv, opts = {}) {
     let closed = false;
     s.on('connect', () => {
       sock = s;
+      attempt = 0;
       proto.send(s, { type: 'register', session });
       flushOutput();
     });
@@ -104,11 +113,13 @@ function run(argv, opts = {}) {
       closed = true;
       if (sock === s) sock = null;
       if (!exiting) {
-        const t = setTimeout(connect, RECONNECT_MS);
+        const delay = RECONNECT_DELAYS_MS[Math.min(attempt++, RECONNECT_DELAYS_MS.length - 1)];
+        const t = setTimeout(connect, delay);
         if (t.unref) t.unref();
       }
     });
   }
+  let attempt = 0;
   connect();
 
   // ---------- output tee ----------
@@ -154,6 +165,13 @@ function run(argv, opts = {}) {
     process.stdin.on('data', (d) => {
       try { child.write(d.toString('utf8')); } catch { /* child gone */ }
     });
+    process.stdin.on('end', () => {
+      // Piped stdin ended (`echo y | tower run ...`). The child's stdin is a
+      // PTY, which has no EOF; send EOT so line-mode readers see end-of-input.
+      if (!process.stdin.isTTY) {
+        try { child.write('\x04'); } catch { /* child gone */ }
+      }
+    });
     process.stdout.on('resize', () => {
       try { child.resize(process.stdout.columns || 80, process.stdout.rows || 24); } catch { /* fine */ }
     });
@@ -162,10 +180,26 @@ function run(argv, opts = {}) {
 
   // ---------- signals ----------
   function terminateChild() {
-    try {
-      if (usingPty) child.kill(process.platform === 'win32' ? undefined : 'SIGTERM');
-      else child.kill('SIGTERM');
-    } catch { /* already gone */ }
+    if (process.platform === 'win32') {
+      // node-pty's ConPTY kill is unreliable and rejects signal names;
+      // TerminateProcess via process.kill is what actually stops the child.
+      try { process.kill(child.pid); } catch { /* already gone */ }
+      // ConPTY does not reliably deliver onExit after TerminateProcess, so
+      // verify the death ourselves; finish() is guarded against double entry.
+      const t0 = Date.now();
+      const poll = setInterval(() => {
+        if (exiting) return clearInterval(poll);
+        let alive = true;
+        try { process.kill(child.pid, 0); } catch { alive = false; }
+        if (!alive || Date.now() - t0 > 3000) {
+          clearInterval(poll);
+          finish(1, 'SIGTERM');
+        }
+      }, 250);
+      if (poll.unref) poll.unref();
+      return;
+    }
+    try { child.kill('SIGTERM'); } catch { /* already gone */ }
     const t = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
     }, 5000);
@@ -192,19 +226,43 @@ function run(argv, opts = {}) {
       try { process.stdin.setRawMode(false); } catch { /* fine */ }
     }
     process.stdin.pause();
+    try { process.stdin.unref(); } catch { /* not all stream types support it */ }
     flushOutput();
     if (sock) {
       proto.send(sock, { type: 'exit', id: session.id, code, signal: signal || null });
       sock.end();
     }
-    const exitCode = typeof code === 'number' ? code : (signal ? 1 : 0);
-    setTimeout(() => process.exit(exitCode), 120);
+    // Mirror the child: its code, or 128+signum for a signal death (so a
+    // segfaulted `tower run build && deploy` does not proceed).
+    const exitCode = signal ? signalExitCode(signal) : (typeof code === 'number' ? code : 0);
+    process.exitCode = exitCode;
+    // Let already-queued output callbacks run, then exit as soon as our own
+    // stdout/stderr have drained; cap the wait so a blocked consumer cannot
+    // hold the wrapper open forever.
+    setImmediate(() => setImmediate(() => {
+      const pending = [process.stdout, process.stderr]
+        .filter((s) => s && typeof s.writableLength === 'number' && s.writableLength > 0);
+      if (pending.length === 0) return process.exit(exitCode);
+      let waiting = pending.length;
+      for (const s of pending) s.once('drain', () => { if (--waiting === 0) process.exit(exitCode); });
+      setTimeout(() => process.exit(exitCode), 5000);
+    }));
   }
 
   if (usingPty) {
-    child.onExit(({ exitCode, signal }) => finish(exitCode, signal));
+    // node-pty reports signal deaths as { exitCode: 0, signal }; finish()
+    // checks the signal first so those are not mistaken for success.
+    child.onExit(({ exitCode, signal }) => finish(exitCode, signal || null));
   } else {
-    child.on('exit', (code, signal) => finish(code, signal));
+    // 'close' fires once the output pipes have drained; 'exit' alone can leave
+    // the child's final lines (a crash stack, typically) undelivered. If a
+    // grandchild inherited the pipes and holds them open, the unref'd fallback
+    // finishes anyway.
+    child.on('close', (code, signal) => finish(code, signal));
+    child.on('exit', (code, signal) => {
+      const t = setTimeout(() => finish(code, signal), 5000);
+      if (t.unref) t.unref();
+    });
     child.on('error', (err) => {
       process.stderr.write(`tower: failed to run ${argv[0]}: ${err.message}\n`);
       finish(127, null);

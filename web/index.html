@@ -102,7 +102,7 @@
 
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
     gap: 12px;
   }
 
@@ -462,6 +462,12 @@ function render() {
   bandLabel(bandAttention.label, 'needs you', need.length, true);
   bandLabel(bandQuiet.label, need.length ? 'all quiet' : 'all quiet — nothing needs you', quiet.length, false);
 
+  // Snapshot the expanded card's scroll BEFORE any DOM moves: a band change
+  // detaches the node (removal loop of one band, re-insert in the other),
+  // and a detached node reads scrollTop 0.
+  const expandedEntry = state.expandedId ? cards.get(state.expandedId) : null;
+  const expandedScroll = expandedEntry ? expandedEntry.refs.output.scrollTop : 0;
+
   const seen = new Set();
   const place = (bucket, grid) => {
     let cursor = null;
@@ -474,11 +480,7 @@ function render() {
       entry.el.classList.toggle('expanded', expanded);
       if (expanded) entry.refs.tail.textContent = '';
       const next = cursor ? cursor.nextSibling : grid.firstChild;
-      if (entry.el !== next) {
-        const scroll = expanded ? entry.refs.output.scrollTop : null;
-        grid.insertBefore(entry.el, next);
-        if (scroll != null) entry.refs.output.scrollTop = state.pinned ? entry.refs.output.scrollHeight : scroll;
-      }
+      if (entry.el !== next) grid.insertBefore(entry.el, next);
       cursor = entry.el;
     }
     while (cursor ? cursor.nextSibling : grid.firstChild) {
@@ -487,6 +489,11 @@ function render() {
   };
   place(need, bandAttention.grid);
   place(quiet, bandQuiet.grid);
+
+  if (expandedEntry && expandedEntry.el.isConnected) {
+    const out = expandedEntry.refs.output;
+    out.scrollTop = state.pinned ? out.scrollHeight : expandedScroll;
+  }
 
   for (const [id, entry] of cards) {
     if (!seen.has(id)) { entry.el.remove(); cards.delete(id); }

@@ -29,7 +29,12 @@ const WAIT_SETTLE_MS = 2000;      // prompt-looking last line unchanged this lon
 const EXITED_TTL_MS = 30 * 60000; // exited sessions drop off the board after this
 
 function ensureTowerDir() {
-  fs.mkdirSync(TOWER_DIR, { recursive: true });
+  // 0700: state.json holds the last ~200 lines of every wrapped terminal,
+  // which routinely includes tokens and connection strings.
+  fs.mkdirSync(TOWER_DIR, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(TOWER_DIR, 0o700); } catch { /* best effort */ }
+  }
   return TOWER_DIR;
 }
 
@@ -89,6 +94,8 @@ function looksLikePrompt(line) {
 // `sess` needs: exited, exitCode, stale, startedAt, lastOutputAt, tailLine.
 function deriveStatus(sess, now = Date.now()) {
   if (sess.exited) {
+    // node-pty reports signal deaths as exitCode 0 + signal; check signal first.
+    if (sess.exitSignal) return 'exited-error';
     if (sess.exitCode === 0) return 'exited-ok';
     if (sess.exitCode === null || sess.exitCode === undefined) return 'exited-unknown';
     return 'exited-error';
