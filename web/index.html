@@ -142,7 +142,7 @@
   .card[data-status="waiting"]::before { background: var(--waiting); }
   .card[data-status="exited-error"]::before { background: var(--error); }
   .card[data-status="idle"]::before { background: var(--idle); }
-  .card[data-status="idle"], .card[data-status="stale"],
+  .card[data-status="idle"], .card[data-status="stale"], .card[data-status="closed"],
   .card[data-status="exited-ok"], .card[data-status="exited-unknown"] { opacity: 0.78; }
   .card:hover, .card.expanded { opacity: 1; }
   .card.expanded { grid-column: 1 / -1; cursor: default; }
@@ -399,10 +399,10 @@ const state = {
 };
 
 const ATTENTION = new Set(['waiting', 'exited-error']);
-const RANK = { waiting: 0, 'exited-error': 1, running: 2, active: 2, idle: 3, stale: 4, 'exited-unknown': 5, 'exited-ok': 6 };
+const RANK = { waiting: 0, 'exited-error': 1, running: 2, active: 2, idle: 3, stale: 4, 'exited-unknown': 5, 'exited-ok': 6, closed: 7 };
 const LABELS = {
   running: 'running', active: 'active', idle: 'idle', waiting: 'waiting on you', stale: 'disconnected',
-  'exited-ok': 'exited · ok', 'exited-error': 'exited', 'exited-unknown': 'exited',
+  'exited-ok': 'exited · ok', 'exited-error': 'exited', 'exited-unknown': 'exited', closed: 'closed',
 };
 
 function statusLabel(s) {
@@ -603,8 +603,11 @@ function updateCard(entry, s, now) {
   el.classList.toggle('has-story', !!sum);
   if (sum) {
     refs.doing.textContent = sum.doing || '';
+    // null fields render as nothing at all - no placeholder text
     refs.last.textContent = sum.last || '';
+    refs.last.parentElement.hidden = !sum.last;
     refs.next.textContent = sum.next || '';
+    refs.next.parentElement.hidden = !sum.next;
     refs.storyAge.textContent = 'as of ' + fmtAgoCoarse(now - (sum.summarizedAt || now));
   }
   refs.tail.textContent = el.classList.contains('expanded') ? '' : (s.tail || '');

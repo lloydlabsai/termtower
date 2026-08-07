@@ -71,11 +71,23 @@ test('parseSummary: strict, fenced, and hostile inputs', () => {
   assert.deepStrictEqual(
     parseSummary('Sure! ```json\n{"doing":"a","last":"b","next":"c"}\n```'),
     { doing: 'a', last: 'b', next: 'c' });
-  assert.strictEqual(parseSummary('{"doing":"a","last":"b"}'), null);
   assert.strictEqual(parseSummary('not json at all'), null);
   assert.strictEqual(parseSummary(''), null);
   const long = parseSummary(JSON.stringify({ doing: 'x'.repeat(500), last: 'b', next: 'c' }));
   assert.ok(long.doing.length <= 160);
+});
+
+test('parseSummary: last/next may honestly be null; doing is required', () => {
+  assert.deepStrictEqual(
+    parseSummary('{"doing":"serving on :8080","last":null,"next":null}'),
+    { doing: 'serving on :8080', last: null, next: null });
+  // missing optional fields read as null, not as a rejection
+  assert.deepStrictEqual(
+    parseSummary('{"doing":"a","last":"b"}'),
+    { doing: 'a', last: 'b', next: null });
+  // no doing, no summary
+  assert.strictEqual(parseSummary('{"doing":null,"last":"b","next":"c"}'), null);
+  assert.strictEqual(parseSummary('{"last":"b","next":"c"}'), null);
 });
 
 test('meaningfulLines drops noise and collapses heartbeats', () => {
@@ -262,6 +274,24 @@ test('parseSummary strips ANSI and control bytes from model output', () => {
     assert.ok(!/[ -]/.test(v), 'control byte survived in ' + JSON.stringify(v));
   }
   assert.match(p.next, /probably fine/);
+});
+
+test('a user-closed session is narrated as a stop, not a crash', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    const { s, sessions } = makeSummarizer();
+    const now = Date.now();
+    sessions.push(fakeSession({
+      exited: true, exitCode: 1, exitSignal: 'SIGTERM', killRequestedAt: now - 2000, exitedAt: now,
+      lines: ['watching src/', 'rebuilt ok', 'shutting down'],
+    }));
+    await s._tick();
+    assert.strictEqual(api.state.calls, 1);
+    const content = api.state.bodies[0].messages[0].content;
+    assert.match(content, /deliberately stopped/);
+    assert.ok(!/has exited \(code/.test(content));
+  } finally { await api.close(); }
 });
 
 test('no key or summaries disabled: never calls, never errors', async () => {

@@ -5,6 +5,7 @@
 // mechanical status, never inputs to it: every failure path in this file must
 // leave core session tracking untouched.
 
+const proto = require('./protocol');
 const config = require('./config');
 const anthropic = require('./anthropic');
 
@@ -51,11 +52,12 @@ function hashLines(lines) {
 }
 
 const SYSTEM_PROMPT = `You annotate a terminal status board. Given recent output from one terminal session, reply with STRICT JSON only - no markdown, no code fences, no extra keys:
-{"doing":"...","last":"...","next":"..."}
-doing: what this session is working on. One line, under 90 characters.
-last: the most recent meaningful development. One line, under 90 characters.
-next: the likely next step, phrased as a suggestion ("probably ...", "likely ..."), never a certainty. One line, under 90 characters.
-Plain language, present tense, no filler. If a previous summary is provided, keep the narrative continuous: "still fixing X, now past Y" beats a disconnected snapshot. If the output is too thin to tell what is happening, say so plainly ("quiet session, nothing notable yet") rather than inventing detail.`;
+{"doing":"...","last":"..." or null,"next":"..." or null}
+doing: what this session is working on. One line, under 90 characters. Required.
+last: the most recent meaningful development. One line, under 90 characters. Use null if nothing meaningful has developed yet.
+next: the likely next step, phrased as a suggestion ("probably ...", "likely ..."), never a certainty. One line, under 90 characters. Use null when there is no meaningful next step - a healthy steady-state server or watcher needs no invented advice.
+Honesty rules: never state a guess as fact; uncertainty must read as uncertainty ("appears to be ...", "may have ..."). Do not invent detail the output does not support - prefer null over speculation.
+Plain language, present tense, no filler. If a previous summary is provided, keep the narrative continuous: "still fixing X, now past Y" beats a disconnected snapshot. If the output is too thin to tell what is happening, say so plainly in doing ("quiet session, nothing notable yet") rather than inventing detail.`;
 
 function buildUserContent(item) {
   const parts = [
@@ -63,7 +65,10 @@ function buildUserContent(item) {
     `directory: ${item.cwd || '(unknown)'}`,
     `command: ${item.command || '(unknown)'}`,
   ];
-  if (item.exited) {
+  if (item.closed) {
+    // A deliberate stop is not a crash and must not read like one.
+    parts.push('NOTE: the user deliberately stopped this session (tower kill / Ctrl+C). Summarize what it was doing and what it got done. Do not describe the stop as a crash or failure. "next" is usually null unless the output shows something left visibly unfinished.');
+  } else if (item.exited) {
     parts.push(`NOTE: the process has exited (code ${item.exitCode ?? 'unknown'}). Summarize what it accomplished or where it failed; "next" is what the user should probably do about it.`);
   }
   if (item.previous) {
@@ -95,11 +100,11 @@ function parseSummary(text) {
     const s = v.replace(SUMMARY_ANSI_RE, '').replace(SUMMARY_CTRL_RE, ' ').trim();
     return s ? s.slice(0, MAX_FIELD_CHARS) : null;
   };
+  // doing is required; last/next may honestly be null (steady-state sessions,
+  // nothing meaningful yet) and render as nothing, not placeholder text.
   const doing = clean(obj.doing);
-  const last = clean(obj.last);
-  const next = clean(obj.next);
-  if (!doing || !last || !next) return null;
-  return { doing, last, next };
+  if (!doing) return null;
+  return { doing, last: clean(obj.last), next: clean(obj.next) };
 }
 
 // collect() -> iterable of session records. A record is summarizable when it
@@ -162,7 +167,8 @@ function createSummarizer({ collect, notify, log, isLive = () => true }) {
       if (fresh < MIN_NEW_LINES && sess.summary) return null;
     }
     return { sess, ctl, sig, lines, exitedPass, name: sess.name, cwd: sess.cwd, command: sess.command,
-      exited: sess.exited, exitCode: sess.exitCode, previous: sess.summary || null,
+      exited: sess.exited, exitCode: sess.exitCode, closed: proto.isUserClosed(sess),
+      previous: sess.summary || null,
       contentLabel: 'recent output', content: lines.join('\n') };
   }
 

@@ -7,6 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const proto = require('./protocol');
+const config = require('./config');
 const { createSummarizer } = require('./summarizer');
 const { createClaudeWatch, deriveClaudeStatus } = require('./claudewatch');
 
@@ -245,6 +246,7 @@ function handleRegister(sock, raw) {
       exitCode: null,
       exitSignal: null,
       exitedAt: null,
+      killRequestedAt: null,
       stale: false,
       pty: !!s.pty,
       buffer: new RingBuffer(),
@@ -301,6 +303,9 @@ function killSession(name) {
     }
   }
   if (!target) return { type: 'error', message: `no running session named "${name}"` };
+  // A tower kill is a deliberate stop: the exit it causes lands as `closed`,
+  // not in the attention band, even if the signal mapping is lossy.
+  target.killRequestedAt = Date.now();
   if (target.sock && !target.sock.destroyed) {
     proto.send(target.sock, { type: 'kill', id: target.id });
   } else if (pidAlive(target.childPid)) {
@@ -503,6 +508,7 @@ function saveStateNow() {
     sessions: [...sessions.values()].map((s) => ({
       ...lightSession(s),
       lines: s.buffer.toLines(),
+      killRequestedAt: s.killRequestedAt || null,
       // summarizer bookkeeping rides along so a restart never re-bills an
       // unchanged session or repeats a done exit pass (board payloads via
       // lightSession never carry these)
@@ -536,6 +542,7 @@ function loadState() {
       exitCode: typeof s.exitCode === 'number' ? s.exitCode : null,
       exitSignal: s.exitSignal || null,
       exitedAt: s.exitedAt || null,
+      killRequestedAt: s.killRequestedAt || null,
       stale: false,
       pty: !!s.pty,
       buffer,
@@ -553,15 +560,20 @@ function loadState() {
         sess.exitedAt = data.savedAt || now;
       }
     }
-    if (sess.exited && now - (sess.exitedAt || 0) > proto.EXITED_TTL_MS) continue;
+    if (sess.exited) {
+      const ttl = proto.isUserClosed(sess) ? config.effectiveCached().closed_ttl_seconds * 1000 : proto.EXITED_TTL_MS;
+      if (now - (sess.exitedAt || 0) > ttl) continue;
+    }
     sessions.set(sess.id, sess);
   }
   if (sessions.size) log(`restored ${sessions.size} session(s) from ${proto.statePath()}`);
 }
 
-// Stale sessions whose processes are gone become exited; old exited cards expire.
+// Stale sessions whose processes are gone become exited; old exited cards
+// expire - user-closed ones on their own configurable clock.
 function cleanupSweep() {
   const now = Date.now();
+  const closedTtlMs = config.effectiveCached().closed_ttl_seconds * 1000;
   let changed = false;
   for (const [id, s] of sessions) {
     if (!s.exited && s.stale && !pidAlive(s.pid) && !pidAlive(s.childPid)) {
@@ -570,9 +582,12 @@ function cleanupSweep() {
       s.exitedAt = now;
       changed = true;
     }
-    if (s.exited && now - (s.exitedAt || 0) > proto.EXITED_TTL_MS) {
-      sessions.delete(id);
-      changed = true;
+    if (s.exited) {
+      const ttl = proto.isUserClosed(s) ? closedTtlMs : proto.EXITED_TTL_MS;
+      if (now - (s.exitedAt || 0) > ttl) {
+        sessions.delete(id);
+        changed = true;
+      }
     }
   }
   if (changed) notifyChange();

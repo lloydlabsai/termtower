@@ -18,6 +18,7 @@ const COLORS = {
   'exited-ok': '\x1b[90m',
   'exited-error': '\x1b[31m', // red
   'exited-unknown': '\x1b[90m',
+  closed: '\x1b[90m',
 };
 const RESET = '\x1b[0m';
 const DIM = '\x1b[2m';
@@ -134,6 +135,7 @@ const ATTENTION_RANK = {
   stale: 4,
   'exited-unknown': 5,
   'exited-ok': 6,
+  closed: 7,
 };
 
 function sortSessions(list) {

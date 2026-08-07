@@ -17,6 +17,7 @@ const DEFAULTS = {
     model: 'claude-haiku-4-5',   // the only place a model string appears
   },
   claude_projects_dir: path.join(os.homedir(), '.claude', 'projects'),
+  closed_ttl_seconds: 1800,      // user-closed sessions leave the board after this
 };
 
 // Dotted paths a user may set. Anything else is a typo we should catch.
@@ -26,6 +27,7 @@ const KNOWN_KEYS = {
   'summaries.interval_seconds': 'number',
   'summaries.model': 'string',
   claude_projects_dir: 'string',
+  closed_ttl_seconds: 'number',
 };
 
 function load(file = proto.configPath()) {
@@ -81,9 +83,12 @@ function effective(cfg = load()) {
     anthropic_key: cfg.anthropic_key ?? DEFAULTS.anthropic_key,
     summaries: { ...DEFAULTS.summaries, ...(cfg.summaries || {}) },
     claude_projects_dir: cfg.claude_projects_dir ?? DEFAULTS.claude_projects_dir,
+    closed_ttl_seconds: cfg.closed_ttl_seconds ?? DEFAULTS.closed_ttl_seconds,
   };
   const iv = Number(out.summaries.interval_seconds);
   out.summaries.interval_seconds = Number.isFinite(iv) && iv >= 30 ? iv : DEFAULTS.summaries.interval_seconds;
+  const ct = Number(out.closed_ttl_seconds);
+  out.closed_ttl_seconds = Number.isFinite(ct) && ct >= 60 ? ct : DEFAULTS.closed_ttl_seconds;
   return out;
 }
 

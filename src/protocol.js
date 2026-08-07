@@ -107,10 +107,31 @@ function looksLikePrompt(line) {
   return PROMPT_PATTERNS.some((re) => re.test(line));
 }
 
+// A deliberate stop is not an alarm. SIGTERM/SIGINT/SIGHUP are the shell
+// conventions for "the user (or their orchestrator) asked this to stop";
+// node-pty reports signals as numbers, child_process as names. On Windows a
+// Ctrl+C death surfaces as STATUS_CONTROL_C_EXIT (seen as either int cast).
+// Anything genuinely ambiguous stays exited-error - a missed real failure is
+// worse than occasional noise (DOCTRINE rule 4).
+const CLOSED_SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGHUP', 15, 2, 1]);
+const WIN_CTRL_C_EXITS = new Set([3221225786, -1073741510]); // 0xC000013A unsigned/signed
+const KILL_GRACE_MS = 60000; // a tower kill explains an exit for this long
+
+function isUserClosed(sess) {
+  if (!sess.exited) return false;
+  // a kill request only explains a prompt death; a session that shrugged it
+  // off and crashed later has a real story to tell (DOCTRINE rule 4)
+  if (sess.killRequestedAt && sess.exitedAt && sess.exitedAt - sess.killRequestedAt < KILL_GRACE_MS) return true;
+  if (sess.exitSignal != null && CLOSED_SIGNALS.has(sess.exitSignal)) return true;
+  return WIN_CTRL_C_EXITS.has(sess.exitCode);
+}
+
 // Pure derivation so the daemon is the single clock.
-// `sess` needs: exited, exitCode, stale, startedAt, lastOutputAt, tailLine.
+// `sess` needs: exited, exitCode, exitSignal, killRequested, stale, startedAt,
+// lastOutputAt, tailLine.
 function deriveStatus(sess, now = Date.now()) {
   if (sess.exited) {
+    if (isUserClosed(sess)) return 'closed';
     // node-pty reports signal deaths as exitCode 0 + signal; check signal first.
     if (sess.exitSignal) return 'exited-error';
     if (sess.exitCode === 0) return 'exited-ok';
@@ -140,5 +161,6 @@ module.exports = {
   onMessages,
   sanitizeText,
   looksLikePrompt,
+  isUserClosed,
   deriveStatus,
 };
