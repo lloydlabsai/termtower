@@ -12,6 +12,13 @@ You run a dev server in one terminal, a test watcher in another, an AI coding ag
 npm i -g termtower
 ```
 
+Or from source:
+
+```
+git clone https://github.com/lloydlabsai/termtower && cd termtower
+npm i -g .
+```
+
 The command it installs is `tower`. Zero config, localhost-only. Without an API key, nothing ever leaves your machine.
 
 ## 60-second demo

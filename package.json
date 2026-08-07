@@ -28,5 +28,13 @@
     "dashboard",
     "cli",
     "devtools"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lloydlabsai/termtower.git"
+  },
+  "homepage": "https://github.com/lloydlabsai/termtower#readme",
+  "bugs": {
+    "url": "https://github.com/lloydlabsai/termtower/issues"
+  }
 }
