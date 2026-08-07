@@ -1,0 +1,28 @@
+{
+  "name": "tower-cli",
+  "version": "0.1.0",
+  "description": "A live control tower for all of your terminal sessions.",
+  "license": "MIT",
+  "bin": {
+    "tower": "bin/tower.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.0.0"
+  },
+  "files": [
+    "bin",
+    "src",
+    "web",
+    "README.md"
+  ],
+  "keywords": [
+    "terminal",
+    "sessions",
+    "dashboard",
+    "cli",
+    "devtools"
+  ]
+}
