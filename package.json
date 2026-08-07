@@ -1,6 +1,6 @@
 {
   "name": "termtower",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "A live control tower for all of your terminal sessions.",
   "license": "MIT",
   "bin": {
@@ -20,7 +20,9 @@
     "src",
     "web",
     "docs",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "DOCTRINE.md"
   ],
   "keywords": [
     "terminal",

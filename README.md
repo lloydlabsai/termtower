@@ -1,8 +1,8 @@
 <img src="docs/wordmark.png" alt="termtower" width="430">
 
-A live control tower for all of your terminal sessions.
+A dashboard for all your terminals - what's running, what's stuck, and what you were doing in each one.
 
-You run a dev server in one terminal, a test watcher in another, an AI coding agent in a third, a build in a fourth. Tower answers one question at a glance: **which of my terminals needs me right now?** And since v1.5, a second one: **what was I doing in each of them?**
+You run a dev server in one terminal, a test watcher in another, an AI coding agent in a third, a build in a fourth. Tower answers the two questions that matter at a glance: **which of my terminals needs me right now?** and **what was I doing in each of them?** Running parallel AI agents? They can coordinate through Tower's [inbox](docs/AGENTS.md).
 
 ![status board](docs/board.png)
 
@@ -44,7 +44,8 @@ Claude Code sessions appear on the board **even without `tower run`** — tower 
 | `idle` | process alive, quiet for a while |
 | `waiting` | the last output line looks like a prompt (`? `, `: `, `[y/n]`, ...) and nothing has been printed since |
 | `active` | (Claude Code sessions) transcript written to in the last 2 minutes |
-| `exited-ok` / `exited-error` | from the exit code |
+| `closed` | you stopped it - `tower kill`, Ctrl+C, SIGTERM; quiet, expires after `closed_ttl_seconds` |
+| `exited-ok` / `exited-error` | from the exit code; only *unexpected* exits enter NEEDS YOU |
 | `stale` | the wrapper lost contact; heals automatically on reconnect |
 
 The waiting heuristic is deliberately dumb and easy to tune: it is a short list of regexes in `src/protocol.js`. Claude Code sessions go `waiting` when the assistant asked a question or requested plan approval (`src/claudewatch.js`).
@@ -64,6 +65,11 @@ tower ls                          # now shows a DOING column
 - Each summary carries an "as of Xm ago" stamp. The mechanical status is never derived from summaries.
 - Exited sessions are summarized once (the closing chapter), then left alone.
 - No key: the board is exactly the classic board, plus a one-time dismissible hint.
+- Each session keeps its story: expanding a card offers a **history** toggle with the prior chapters, and `tower history <session>` prints the same timeline (last `summaries.history_depth` entries, default 12).
+
+Without a key it looks like this - pure mechanical truth:
+
+![classic board](docs/board-classic.png)
 
 Config lives in `~/.tower/config.json` (created `0600`); `ANTHROPIC_API_KEY` in the environment also works, the file wins. Knobs:
 
@@ -95,6 +101,9 @@ With a key configured, the only network traffic is to the Anthropic Messages API
 tower run [--name <name>] <command> [args...]   wrap a command so it shows on the board
 tower ls                                        list sessions in the terminal
 tower search <text>                             find it across every session's recent output
+tower send <session|all> "<text>"               leave a note in a session's inbox
+tower inbox [--peek] [--name <s>] [--drain]     read an inbox (see docs/AGENTS.md)
+tower history <session>                         the session's story, newest first
 tower open                                      open the status board in a browser
 tower kill <name>                               stop a session ("daemon" stops towerd)
 tower config get [key]                          show configuration (secrets masked)
@@ -126,7 +135,7 @@ No database, no accounts, no cloud, no telemetry.
 
 ## Platform support
 
-macOS and Linux. Windows is out of scope for v1, though most of it happens to work there (named pipe instead of a Unix socket, ConPTY via node-pty).
+Windows, macOS, and Linux (Node >= 18). The platform seams are small and deliberate: a named pipe instead of a Unix domain socket on Windows, ConPTY via node-pty, and signal-mapping quirks handled in the wrapper. CI runs the full suite on all three.
 
 ## Uninstall
 
