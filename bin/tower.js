@@ -398,6 +398,10 @@ async function cmdConfig(args) {
       console.error('tower: summaries.interval_seconds must be at least 30');
       process.exit(1);
     }
+    if (key === 'closed_ttl_seconds' && value < 60) {
+      console.error('tower: closed_ttl_seconds must be at least 60');
+      process.exit(1);
+    }
     if (key === 'anthropic_key' && !config.looksLikeAnthropicKey(value)) {
       console.error('tower: that does not look like an Anthropic API key (expected sk-...)');
       process.exit(1);

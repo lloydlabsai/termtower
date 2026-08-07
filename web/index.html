@@ -244,6 +244,8 @@
   }
   .card.has-story .story { display: block; }
   .story-line { display: flex; gap: 9px; margin: 2px 0; }
+  /* author display:flex would otherwise defeat the UA [hidden] rule */
+  .story-line[hidden] { display: none; }
   .story-line .k {
     flex: none;
     width: 28px;

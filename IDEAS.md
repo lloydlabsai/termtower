@@ -12,6 +12,8 @@ Explicit non-goals of v1.5, recorded so they stay said no to (for now):
 
 Maybe someday:
 
+- Wrapper reports signal provenance (did IT receive the signal from outside vs forward a tower kill), so a watchdog's SIGTERM could be told apart from a user's and kept in the attention band
+
 - Treat a finished Claude Code turn (final assistant text, no question) as `waiting` — "Claude is done, come back" — possibly with a decay window so it does not shout forever
 
 - ANSI color rendering in the board's output pane (currently stripped to plain text)

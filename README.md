@@ -159,6 +159,11 @@ v1.5 additions:
 - **`tower config set anthropic_key` prompts with hidden input.** Keys typed as arguments live forever in shell history; the argv form still works for scripts.
 - **Model output is control-stripped before display.** Summaries land in terminals (`tower ls`); a hostile transcript talking the model into emitting escape sequences gets spaces instead.
 
+v2 additions:
+
+- **`closed` means "you stopped it".** `tower kill` (within a 60s grace window), SIGINT/SIGTERM/SIGHUP, and Windows Ctrl+C derive a quiet `closed` status instead of `exited-error`. Known tradeoff, chosen deliberately: an external watchdog's SIGTERM (a `timeout(1)` deadline, a supervisor restart) also reads as closed - the card stays visible in the quiet band with its `closed` label until `closed_ttl_seconds`, it just does not alarm. Signal provenance from the wrapper could tighten this later (IDEAS).
+- **`null` beats invented advice.** The summarizer may answer `last`/`next` with null; the board and `ls` render nothing for a null field. A steady-state server "probably needs" nothing.
+
 ## License
 
 MIT

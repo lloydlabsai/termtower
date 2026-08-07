@@ -304,8 +304,11 @@ function killSession(name) {
   }
   if (!target) return { type: 'error', message: `no running session named "${name}"` };
   // A tower kill is a deliberate stop: the exit it causes lands as `closed`,
-  // not in the attention band, even if the signal mapping is lossy.
+  // not in the attention band, even if the signal mapping is lossy. Persist
+  // promptly - a daemon restart inside the kill window must not demote the
+  // stop to exited-unknown.
   target.killRequestedAt = Date.now();
+  notifyChange();
   if (target.sock && !target.sock.destroyed) {
     proto.send(target.sock, { type: 'kill', id: target.id });
   } else if (pidAlive(target.childPid)) {
