@@ -126,6 +126,7 @@ function createClaudeWatch({ notify, log }) {
       const prev = restored.get(id);
       if (prev) {
         rec.summary = prev.summary || null;
+        rec.summaryHistory = Array.isArray(prev.history) ? prev.history : [];
         rec.summaryCtl.sig = prev.sig;
         restored.delete(id);
       }
@@ -215,7 +216,7 @@ function createClaudeWatch({ notify, log }) {
     persistable() {
       return [...records.values()]
         .filter((r) => r.summary)
-        .map((r) => ({ id: r.id, summary: r.summary, sig: r.summaryCtl.sig || null }));
+        .map((r) => ({ id: r.id, summary: r.summary, history: r.summaryHistory || [], sig: r.summaryCtl.sig || null }));
     },
     restore(arr) {
       for (const item of Array.isArray(arr) ? arr : []) {

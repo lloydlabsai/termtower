@@ -169,6 +169,7 @@ v2 additions:
 
 - **`closed` means "you stopped it".** `tower kill` (within a 60s grace window), SIGINT/SIGTERM/SIGHUP, and Windows Ctrl+C derive a quiet `closed` status instead of `exited-error`. Known tradeoff, chosen deliberately: an external watchdog's SIGTERM (a `timeout(1)` deadline, a supervisor restart) also reads as closed - the card stays visible in the quiet band with its `closed` label until `closed_ttl_seconds`, it just does not alarm. Signal provenance from the wrapper could tighten this later (IDEAS).
 - **`null` beats invented advice.** The summarizer may answer `last`/`next` with null; the board and `ls` render nothing for a null field. A steady-state server "probably needs" nothing.
+- **History is a ring, not an archive.** The last `summaries.history_depth` (default 12) prior summaries per session, kept in state.json, dropped without exception past the depth. Search does NOT index history - search is a status tool; the current summary is the status.
 
 ## License
 

@@ -15,6 +15,7 @@ const DEFAULTS = {
     enabled: true,               // meaningful only when a key is present
     interval_seconds: 180,
     model: 'claude-haiku-4-5',   // the only place a model string appears
+    history_depth: 12,           // prior summaries kept per session, hard ring
   },
   claude_projects_dir: path.join(os.homedir(), '.claude', 'projects'),
   closed_ttl_seconds: 1800,      // user-closed sessions leave the board after this
@@ -30,6 +31,7 @@ const KNOWN_KEYS = {
   'summaries.enabled': 'boolean',
   'summaries.interval_seconds': 'number',
   'summaries.model': 'string',
+  'summaries.history_depth': 'number',
   claude_projects_dir: 'string',
   closed_ttl_seconds: 'number',
   'inbox.ttl_hours': 'number',
@@ -94,6 +96,8 @@ function effective(cfg = load()) {
   };
   const iv = Number(out.summaries.interval_seconds);
   out.summaries.interval_seconds = Number.isFinite(iv) && iv >= 30 ? iv : DEFAULTS.summaries.interval_seconds;
+  const hd = Number(out.summaries.history_depth);
+  out.summaries.history_depth = Number.isFinite(hd) && hd >= 1 && hd <= 50 ? Math.floor(hd) : DEFAULTS.summaries.history_depth;
   const ct = Number(out.closed_ttl_seconds);
   out.closed_ttl_seconds = Number.isFinite(ct) && ct >= 60 ? ct : DEFAULTS.closed_ttl_seconds;
   const th = Number(out.inbox.ttl_hours);

@@ -194,6 +194,12 @@ function createSummarizer({ collect, notify, log, isLive = () => true }) {
     // The owner may have dropped this record while we were on the wire;
     // writing a summary to a ghost helps no one.
     if (!isLive(item.sess)) return;
+    // The superseded summary joins a hard ring - the story of the session,
+    // newest first, never unbounded (state.json is not a database).
+    if (item.sess.summary) {
+      const depth = eff.summaries.history_depth;
+      item.sess.summaryHistory = [item.sess.summary, ...(item.sess.summaryHistory || [])].slice(0, depth);
+    }
     item.sess.summary = { ...parsed, summarizedAt: Date.now() };
     notify();
   }

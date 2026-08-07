@@ -38,6 +38,7 @@ usage:
   tower send <session|all> <text>                 leave a note in a session's inbox (--event to tag it)
   tower inbox [--peek]                            read and drain your own inbox (inside tower run)
   tower inbox --name <session> [--drain]          look at another session's inbox (--drain to take it)
+  tower history <session>                         the session's story: current and prior summaries
   tower open                                      open the status board in a browser
   tower kill <name>                               stop a session (or "daemon" to stop towerd)
   tower config get [key]                          show configuration (secrets masked)
@@ -363,6 +364,33 @@ async function cmdInbox(argv) {
   if (peek) console.log(paint(`(${messages.length} message${messages.length === 1 ? '' : 's'} left in the inbox)`, DIM));
 }
 
+// ---------- history ----------
+
+async function cmdHistory(argv) {
+  const name = argv.join(' ').trim() || process.env.TOWER_SESSION;
+  if (!name) usage();
+  const reply = await request({ type: 'history', name });
+  if (reply.type === 'error') {
+    console.error(`tower: ${reply.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const entries = [];
+  if (reply.current) entries.push(reply.current);
+  entries.push(...(reply.history || []));
+  if (entries.length === 0) {
+    console.log(`no summaries yet for ${reply.name}`);
+    return;
+  }
+  const now = Date.now();
+  console.log(paint(reply.name, COLORS.running));
+  for (const e of entries) {
+    console.log(`${paint((fmtDur(now - (e.summarizedAt || now)) + ' ago').padEnd(10), DIM)} ${e.doing}`);
+    if (e.last) console.log(`${''.padEnd(11)}${paint('last: ' + e.last, DIM)}`);
+    if (e.next) console.log(`${''.padEnd(11)}${paint('next: ' + e.next, DIM)}`);
+  }
+}
+
 // ---------- config ----------
 
 const SECRET_KEY_RE = /key|token|secret/i;
@@ -529,6 +557,7 @@ async function main() {
     case 'search': case 'grep': return cmdSearch(args);
     case 'send': return cmdSend(args);
     case 'inbox': return cmdInbox(args);
+    case 'history': return cmdHistory(args);
     case 'open': return cmdOpen();
     case 'kill': return cmdKill(args[0]);
     case 'config': return cmdConfig(args);

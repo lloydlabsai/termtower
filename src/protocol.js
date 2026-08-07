@@ -18,6 +18,7 @@
 //   { type: 'post', from, to, msgType, payload }
 //                                  -> { type: 'ok', delivered } | { type: 'error', message }
 //   { type: 'fetch', name, peek }  -> { type: 'inbox', messages: [...] } | { type: 'error', message }
+//   { type: 'history', name }      -> { type: 'history', name, current, history } | { type: 'error', message }
 //   { type: 'kill-session', name } -> { type: 'ok', name } | { type: 'error', message }
 //   { type: 'shutdown' }           -> { type: 'ok' }
 

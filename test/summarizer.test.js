@@ -276,6 +276,25 @@ test('parseSummary strips ANSI and control bytes from model output', () => {
   assert.match(p.next, /probably fine/);
 });
 
+test('superseded summaries ring up newest-first, hard-capped at history_depth', async () => {
+  const api = await mockApi();
+  try {
+    writeConfig({ anthropic_key: 'sk-test-aaaaaaaaaaaaaaaaaaaaaaaa', summaries: { history_depth: 3 } });
+    const { s, sessions } = makeSummarizer();
+    const sess = fakeSession();
+    sessions.push(sess);
+    for (let gen = 1; gen <= 5; gen++) {
+      sess.buffer.toLines = () => [`generation ${gen} line one`, `generation ${gen} line two`, `generation ${gen} line three`];
+      api.state.text = JSON.stringify({ doing: `working on gen ${gen}`, last: 'l' + gen, next: 'n' + gen });
+      await s._tick();
+    }
+    assert.strictEqual(api.state.calls, 5);
+    assert.strictEqual(sess.summary.doing, 'working on gen 5');
+    assert.deepStrictEqual(sess.summaryHistory.map((h) => h.doing),
+      ['working on gen 4', 'working on gen 3', 'working on gen 2']); // gen 1 fell off the ring
+  } finally { await api.close(); }
+});
+
 test('a user-closed session is narrated as a stop, not a crash', async () => {
   const api = await mockApi();
   try {

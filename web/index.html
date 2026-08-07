@@ -306,6 +306,37 @@
     color: var(--text-faint);
     margin-top: 3px;
   }
+  .history-toggle {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    padding: 0;
+    margin-left: 10px;
+  }
+  .card.expanded .history-toggle.avail { display: inline; }
+  .history-toggle:hover { color: var(--text); }
+  .history {
+    display: none;
+    margin-top: 6px;
+    border-top: 1px dashed var(--border-soft);
+    padding-top: 6px;
+  }
+  .card.expanded.show-history .history { display: block; }
+  .hist-item { font-size: 11.5px; color: var(--text-dim); margin: 4px 0; }
+  .hist-item .t {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--text-faint);
+    margin-right: 7px;
+  }
+  .hist-item .d { color: var(--text); }
+  .hist-item .rest { color: var(--text-faint); }
 
   /* ---------- notice bar (no-key hint / key trouble) ---------- */
   .notice {
@@ -575,7 +606,18 @@ function makeCard(s) {
   const next = storyRow('next', 'next');
   const storyAge = document.createElement('span');
   storyAge.className = 'story-age';
-  story.append(storyAge);
+  const storyAgeText = document.createElement('span');
+  const historyToggle = document.createElement('button');
+  historyToggle.className = 'history-toggle';
+  historyToggle.textContent = 'history';
+  historyToggle.addEventListener('click', (e) => {
+    e.stopPropagation(); // do not collapse the card
+    el.classList.toggle('show-history');
+  });
+  storyAge.append(storyAgeText, historyToggle);
+  const history = document.createElement('div');
+  history.className = 'history';
+  story.append(storyAge, history);
 
   const tail = document.createElement('p');
   tail.className = 'tail';
@@ -601,7 +643,39 @@ function makeCard(s) {
     }
   });
 
-  return { el, refs: { statusLabelEl, agoNum, agoSub, nameText, badge, mailBadge, cwd, cmd, branchSep, branch, doing, last, next, storyAge, tail, hits, mailbox, output } };
+  return { el, refs: { statusLabelEl, agoNum, agoSub, nameText, badge, mailBadge, cwd, cmd, branchSep, branch, doing, last, next, storyAgeText, historyToggle, history, tail, hits, mailbox, output } };
+}
+
+// Prior chapters, newest first; read-only, no pagination, no export.
+function setHistory(entry, items) {
+  const { historyToggle, history } = entry.refs;
+  const list = items || [];
+  historyToggle.classList.toggle('avail', list.length > 0);
+  history.textContent = '';
+  if (!list.length) {
+    entry.el.classList.remove('show-history');
+    return;
+  }
+  const now = Date.now();
+  for (const h of list) {
+    const item = document.createElement('p');
+    item.className = 'hist-item';
+    const t = document.createElement('span');
+    t.className = 't';
+    t.textContent = fmtAgoCoarse(now - (h.summarizedAt || now));
+    const d = document.createElement('span');
+    d.className = 'd';
+    d.textContent = h.doing || '';
+    item.append(t, d);
+    const rest = [h.last, h.next].filter(Boolean).join(' · ');
+    if (rest) {
+      const r = document.createElement('span');
+      r.className = 'rest';
+      r.textContent = ' — ' + rest;
+      item.append(r);
+    }
+    history.append(item);
+  }
 }
 
 // Read-only queue view; draining is the session's own business (tower inbox).
@@ -684,7 +758,7 @@ function updateCard(entry, s, now) {
     refs.last.parentElement.hidden = !sum.last;
     refs.next.textContent = sum.next || '';
     refs.next.parentElement.hidden = !sum.next;
-    refs.storyAge.textContent = 'as of ' + fmtAgoCoarse(now - (sum.summarizedAt || now));
+    refs.storyAgeText.textContent = 'as of ' + fmtAgoCoarse(now - (sum.summarizedAt || now));
   }
   refs.tail.textContent = el.classList.contains('expanded') ? '' : (s.tail || '');
   const match = s._match;
@@ -718,6 +792,7 @@ async function fetchOutput(id) {
       if (entry && state.expandedId === id) {
         setOutput(entry, data.lines);
         setMail(entry, data.mail);
+        setHistory(entry, data.summaryHistory);
       }
     }
   } catch { /* the SSE stream will fill it in */ }

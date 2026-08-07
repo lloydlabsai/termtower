@@ -206,6 +206,21 @@ function normCwd(p) {
   return s;
 }
 
+// Find one session (wrapped or transcript) by name or id, for read paths
+// like history. No mailbox canonicalization: a merged pair's summaries live
+// on the transcript record, and reads should reach whichever was named.
+function findSession(name) {
+  const wanted = String(name || '').trim();
+  if (!wanted) return { error: 'no session given' };
+  const hits = [
+    ...[...sessions.values()].filter((s) => s.name === wanted || s.id === wanted),
+    ...[...claudeWatch.records()].filter((r) => r.name === wanted || r.id === wanted),
+  ];
+  if (hits.length === 0) return { error: `no session named "${wanted}"` };
+  if (hits.length > 1) return { error: `"${wanted}" is ambiguous (${hits.length} sessions); use an id from tower ls` };
+  return { session: hits[0] };
+}
+
 // A `tower run claude` wrapper and a transcript record in the same cwd are
 // the same session. One source of truth for that pairing: ccId -> wrapper
 // record, newest transcript first, each wrapper claimed once. Used by the
@@ -466,11 +481,11 @@ const httpServer = http.createServer((req, res) => {
     if (cc) {
       const lines = (cc.turns || []).flatMap((t) => [`${t.role}:`, ...t.text.split('\n'), '']);
       const claimedBy = claudeClaims().get(cc.id);
-      return json(res, 200, { ...lightClaude(cc), lines, mail: mailroom.fetch(claimedBy ? claimedBy.id : cc.id, { peek: true }) });
+      return json(res, 200, { ...lightClaude(cc), lines, mail: mailroom.fetch(claimedBy ? claimedBy.id : cc.id, { peek: true }), summaryHistory: cc.summaryHistory || [] });
     }
     const sess = sessions.get(m[1]);
     if (!sess) return json(res, 404, { error: 'no such session' });
-    return json(res, 200, { ...lightSession(sess), lines: sess.buffer.toLines(), mail: mailroom.fetch(sess.id, { peek: true }) });
+    return json(res, 200, { ...lightSession(sess), lines: sess.buffer.toLines(), mail: mailroom.fetch(sess.id, { peek: true }), summaryHistory: sess.summaryHistory || [] });
   }
   return json(res, 404, { error: 'not found' });
 });
@@ -556,6 +571,7 @@ function saveStateNow() {
       ...lightSession(s),
       lines: s.buffer.toLines(),
       killRequestedAt: s.killRequestedAt || null,
+      summaryHistory: s.summaryHistory || [],
       // unread is derived, not state; it rides in via lightSession but is
       // ignored on load (the mailroom owns the truth)
       // summarizer bookkeeping rides along so a restart never re-bills an
@@ -599,6 +615,7 @@ function loadState() {
       buffer,
       sock: null,
       summary: s.summary || null,
+      summaryHistory: Array.isArray(s.summaryHistory) ? s.summaryHistory : [],
       summaryCtl: { sig: s.summarySig || undefined, exitDone: !!s.summaryExitDone },
     };
     if (!sess.exited) {
@@ -703,6 +720,17 @@ const server = net.createServer((sock) => {
         const delivered = mailroom.post({ from: sender ? sender.name : msg.from, recipients: ids, type: msg.msgType, payload: msg.payload });
         proto.send(sock, { type: 'ok', delivered });
         notifyChange();
+        break;
+      }
+      case 'history': {
+        const r = findSession(msg.name);
+        if (r.error) { proto.send(sock, { type: 'error', message: r.error }); break; }
+        proto.send(sock, {
+          type: 'history',
+          name: r.session.name,
+          current: r.session.summary || null,
+          history: r.session.summaryHistory || [],
+        });
         break;
       }
       case 'fetch': {
