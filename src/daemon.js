@@ -29,25 +29,37 @@ const claudeWatch = createClaudeWatch({
 // Session messaging: daemon as mailbox, agents as opt-in readers.
 const mailroom = createMailroom({ log });
 
-// "vite-dev", a session id, a cc- transcript id, or "all" -> session ids.
-// Unknown names are an error, not a silent drop.
-function resolveRecipients(spec) {
+// "vite-dev", a session id, a cc- transcript id, or "all" -> mailbox ids.
+// One logical session gets ONE mailbox: a transcript card that claims a
+// wrapper resolves to the wrapper's id (that is the box TOWER_SESSION drains).
+// Unknown names are an error; ambiguous names are an error, never a guess.
+function resolveRecipients(spec, { includeExited = false } = {}) {
   const wanted = String(spec || '').trim();
   if (!wanted) return { error: 'no recipient given' };
-  const live = [];
-  for (const s of sessions.values()) if (!s.exited) live.push(s);
+  const pool = [];
+  for (const s of sessions.values()) if (includeExited || !s.exited) pool.push(s);
   const agents = [...claudeWatch.records()];
+  const claims = claudeClaims();
+  const canonical = (id) => (claims.has(id) ? claims.get(id).id : id);
   if (wanted === 'all') {
-    return { ids: [...live.map((s) => s.id), ...agents.map((r) => r.id)] };
+    const ids = new Set(pool.filter((s) => !s.exited).map((s) => s.id));
+    for (const r of agents) ids.add(canonical(r.id));
+    return { ids: [...ids], all: true };
   }
-  const ids = [];
+  const ids = new Set();
   for (const part of wanted.split(',').map((p) => p.trim()).filter(Boolean)) {
-    const hit = live.find((s) => s.name === part || s.id === part)
-      || agents.find((r) => r.name === part || r.id === part);
-    if (!hit) return { error: `no live session named "${part}"` };
-    ids.push(hit.id);
+    const hits = [
+      ...pool.filter((s) => s.name === part || s.id === part),
+      ...agents.filter((r) => r.name === part || r.id === part),
+    ];
+    if (hits.length === 0) return { error: `no live session named "${part}"` };
+    const unique = new Set(hits.map((h) => canonical(h.id)));
+    if (unique.size > 1) {
+      return { error: `"${part}" is ambiguous (${unique.size} sessions); use an id from tower ls` };
+    }
+    ids.add([...unique][0]);
   }
-  return { ids };
+  return { ids: [...ids], all: false };
 }
 
 // The narrative layer: no key configured means this never makes a call and
@@ -229,6 +241,9 @@ function lightList() {
       a.childPid = w.childPid;
       if (w.tail) a.tail = w.tail;
       if (w.status === 'waiting') a.status = 'waiting';
+      // one logical session, one mailbox: the wrapper's (that is what the
+      // agent's TOWER_SESSION drains), so the badge must count it
+      a.unread = mailroom.unread(wrapper.id);
     }
     out.push(a);
   }
@@ -450,7 +465,8 @@ const httpServer = http.createServer((req, res) => {
     const cc = claudeWatch.get(m[1]);
     if (cc) {
       const lines = (cc.turns || []).flatMap((t) => [`${t.role}:`, ...t.text.split('\n'), '']);
-      return json(res, 200, { ...lightClaude(cc), lines, mail: mailroom.fetch(cc.id, { peek: true }) });
+      const claimedBy = claudeClaims().get(cc.id);
+      return json(res, 200, { ...lightClaude(cc), lines, mail: mailroom.fetch(claimedBy ? claimedBy.id : cc.id, { peek: true }) });
     }
     const sess = sessions.get(m[1]);
     if (!sess) return json(res, 404, { error: 'no such session' });
@@ -626,7 +642,10 @@ function cleanupSweep() {
     }
   }
   mailroom.sweep(now);
-  mailroom.retain(new Set([...sessions.keys(), ...[...claudeWatch.records()].map((r) => r.id)]));
+  // Wrapped mailboxes die with their session records; transcript (cc-)
+  // mailboxes are governed by the TTL alone - falling off the 45-minute
+  // board window is not death, and the 24h promise holds (review finding).
+  mailroom.retain((id) => sessions.has(id) || id.startsWith('cc-'));
   if (changed) notifyChange();
 }
 
@@ -676,13 +695,20 @@ const server = net.createServer((sock) => {
       case 'post': {
         const r = resolveRecipients(msg.to);
         if (r.error) { proto.send(sock, { type: 'error', message: r.error }); break; }
-        const delivered = mailroom.post({ from: msg.from, recipients: r.ids, type: msg.msgType, payload: msg.payload });
+        // "all" means everyone else - the announcer does not need a copy
+        const ids = r.all ? r.ids.filter((id) => id !== msg.from) : r.ids;
+        // a from that IS a live session id becomes that session's name: the
+        // one sender label the daemon can actually vouch for
+        const sender = sessions.get(String(msg.from || ''));
+        const delivered = mailroom.post({ from: sender ? sender.name : msg.from, recipients: ids, type: msg.msgType, payload: msg.payload });
         proto.send(sock, { type: 'ok', delivered });
         notifyChange();
         break;
       }
       case 'fetch': {
-        const r = resolveRecipients(msg.name);
+        // exited sessions keep readable mail until they expire - a badge the
+        // CLI refuses to clear would be worse than useless
+        const r = resolveRecipients(msg.name, { includeExited: true });
         if (r.error || r.ids.length !== 1) { proto.send(sock, { type: 'error', message: r.error || 'fetch takes exactly one session' }); break; }
         const messages = mailroom.fetch(r.ids[0], { peek: !!msg.peek });
         proto.send(sock, { type: 'inbox', messages });
@@ -825,4 +851,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { start, sessions, RingBuffer, isClaudeCommand, matchSession };
+module.exports = { start, sessions, RingBuffer, isClaudeCommand, matchSession, resolveRecipients };

@@ -36,7 +36,8 @@ usage:
   tower ls                                        list sessions in the terminal
   tower search <text>                             find it across every session's recent output
   tower send <session|all> <text>                 leave a note in a session's inbox (--event to tag it)
-  tower inbox [--name <session>] [--peek]         read (and drain) an inbox; inside tower run, infers self
+  tower inbox [--peek]                            read and drain your own inbox (inside tower run)
+  tower inbox --name <session> [--drain]          look at another session's inbox (--drain to take it)
   tower open                                      open the status board in a browser
   tower kill <name>                               stop a session (or "daemon" to stop towerd)
   tower config get [key]                          show configuration (secrets masked)
@@ -324,16 +325,22 @@ async function cmdSend(argv) {
 async function cmdInbox(argv) {
   let name = null;
   let peek = false;
+  let drain = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--name' || argv[i] === '-n') name = argv[++i];
     else if (argv[i] === '--peek') peek = true;
+    else if (argv[i] === '--drain') drain = true;
     else usage();
   }
+  const named = !!name;
   if (!name) name = process.env.TOWER_SESSION;
   if (!name) {
     console.error('tower: not inside a tower session; say whose inbox with --name <session>');
     process.exit(1);
   }
+  // Your own inbox drains on read; someone else's is a look, not a take,
+  // unless you say --drain out loud.
+  if (named && !drain) peek = true;
   const reply = await request({ type: 'fetch', name, peek });
   if (reply.type === 'error') {
     console.error(`tower: ${reply.message}`);
@@ -349,7 +356,9 @@ async function cmdInbox(argv) {
   for (const m of messages) {
     const tag = m.type === 'event' ? paint('[event]', COLORS.waiting) : paint('[note]', DIM);
     console.log(`${tag} ${paint(m.from, COLORS.running)} ${paint(fmtDur(now - m.ts) + ' ago', DIM)}`);
-    console.log(`  ${m.payload}`);
+    // every payload line is indented, so a multiline payload can never
+    // impersonate a header line
+    for (const line of String(m.payload).split('\n')) console.log(`  ${line}`);
   }
   if (peek) console.log(paint(`(${messages.length} message${messages.length === 1 ? '' : 's'} left in the inbox)`, DIM));
 }

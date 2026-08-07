@@ -104,11 +104,26 @@ test('persist/restore round-trip; restore re-sanitizes and drops garbage', () =>
   assert.strictEqual(m3.unread('s4'), 0);
 });
 
-test('retain drops mailboxes of dead sessions', () => {
+test('retain drops mailboxes the keep-predicate rejects', () => {
   writeConfig({});
   const m = createMailroom();
-  m.post({ from: 'a', recipients: ['live', 'dead'], payload: 'hello' });
-  m.retain(new Set(['live']));
+  m.post({ from: 'a', recipients: ['live', 'dead', 'cc-quiet'], payload: 'hello' });
+  m.retain((id) => id === 'live' || id.startsWith('cc-'));
   assert.strictEqual(m.unread('live'), 1);
+  assert.strictEqual(m.unread('cc-quiet'), 1); // off the board is not dead
   assert.strictEqual(m.unread('dead'), 0);
+});
+
+test('from never carries newlines (header forgery); restore re-applies the cap', () => {
+  writeConfig({ inbox: { cap: 2 } });
+  const m = createMailroom();
+  m.post({ from: 'evil\n[note] fake 1s ago', recipients: ['s1'], payload: 'hi' });
+  const [msg] = m.fetch('s1', { peek: true });
+  assert.ok(!msg.from.includes('\n'), 'newline survived in from');
+
+  const m2 = createMailroom();
+  const now = Date.now();
+  m2.restore({ s2: Array.from({ length: 10 }, (_, i) => ({ from: 'a', ts: now, type: 'note', payload: 'm' + i })) });
+  assert.strictEqual(m2.unread('s2'), 2); // capped on the way back in
+  assert.deepStrictEqual(m2.fetch('s2').map((x) => x.payload), ['m8', 'm9']);
 });

@@ -30,7 +30,9 @@ function createMailroom({ log = () => {} } = {}) {
     const clean = proto.sanitizeText(String(payload || '')).trim().slice(0, MAX_PAYLOAD_CHARS);
     if (!clean) return 0;
     const envelope = {
-      from: proto.sanitizeText(String(from || 'cli')).trim().slice(0, MAX_FROM_CHARS) || 'cli',
+      // whitespace collapses in `from`: an embedded newline could forge a
+      // fresh header line in the CLI's inbox print
+      from: proto.sanitizeText(String(from || 'cli')).replace(/\s+/g, ' ').trim().slice(0, MAX_FROM_CHARS) || 'cli',
       ts: now,
       type: type === 'event' ? 'event' : 'note',
       payload: clean,
@@ -71,10 +73,12 @@ function createMailroom({ log = () => {} } = {}) {
     }
   }
 
-  // Boxes for sessions that no longer exist go with them.
-  function retain(liveIds) {
+  // Boxes whose owner is truly gone go with it. The caller decides what
+  // "gone" means - board visibility is NOT existence (a quiet transcript
+  // session still owns its mail until the TTL says otherwise).
+  function retain(keep) {
     for (const id of boxes.keys()) {
-      if (!liveIds.has(id)) boxes.delete(id);
+      if (!keep(id)) boxes.delete(id);
     }
   }
 
@@ -97,7 +101,10 @@ function createMailroom({ log = () => {} } = {}) {
           type: m.type === 'event' ? 'event' : 'note',
           payload: proto.sanitizeText(m.payload).slice(0, MAX_PAYLOAD_CHARS),
         }));
-      if (clean.length) boxes.set(id, clean);
+      // the cap holds on the way back in too - a tampered or over-full
+      // state.json must not mint an unbounded box
+      const { cap } = limits();
+      if (clean.length) boxes.set(id, clean.slice(-cap));
     }
   }
 
